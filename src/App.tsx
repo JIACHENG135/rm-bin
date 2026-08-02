@@ -220,11 +220,11 @@ export default function App() {
         data-tauri-drag-region
         style={{ rotateX: rotX, rotateY: rotY }}
         variants={{
-          /* breathing: a clear, slow rise and fall */
+          /* breathing: rests small and quiet, grows when a file approaches */
           idle: {
             x: 0,
             y: [0, -5, 0],
-            scale: [1, 1.02, 1],
+            scale: [0.78, 0.81, 0.78],
             transition: {
               y: { duration: 3.2, repeat: Infinity, ease: "easeInOut" },
               scale: { duration: 3.2, repeat: Infinity, ease: "easeInOut" },
