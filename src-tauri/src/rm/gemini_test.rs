@@ -39,7 +39,7 @@ fn the_extension_follows_the_bytes_not_the_response() {
 #[test]
 fn the_prompt_describes_the_actual_pipeline() {
     let p = super::gemini::prompt(crate::rm::draw::BASE_WORK as u32);
-    assert!(p.contains("700"), "the work raster must be stated: {p}");
+    assert!(p.contains("1300"), "the work raster must be stated: {p}");
     for must in ["Otsu", "Zhang-Suen", "branch", "outlines only", "print letters"] {
         assert!(p.contains(must), "prompt is missing {must:?}");
     }

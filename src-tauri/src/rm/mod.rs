@@ -18,6 +18,10 @@ pub mod imageproc;
 #[path = "draw_test.rs"]
 mod draw_test;
 
+#[cfg(test)]
+#[path = "imageproc_test.rs"]
+mod imageproc_test;
+
 /// Writing finished `.rm` pages instead of replaying the pen. `upload` puts
 /// them on the tablet; which of the two paths runs is `Settings::mode`.
 pub mod rmfile;

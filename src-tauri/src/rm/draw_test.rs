@@ -123,9 +123,10 @@ fn rm2_plan_is_in_bounds_and_top_down() {
 }
 
 /// The push is paced, so the byte count *is* the drawing time — and that
-/// time is also how long the window's scan animation runs. `BASE_WORK` and
-/// `MAX_STROKE_POINTS` are the dials; this is the guard that keeps a careless
-/// nudge to either from turning a drop into a ten-minute wait.
+/// time is also how long the window's scan animation runs. The dials are the
+/// raster size `page_fit` picks, `EPSILON` and `MAX_PEN_SAMPLES`; this is the
+/// guard that keeps a careless nudge to any of them from turning a drop into
+/// a ten-minute wait.
 #[test]
 fn draw_time_stays_bounded() {
     for calib in [PAPER_PRO, RM2] {
@@ -138,6 +139,28 @@ fn draw_time_stays_bounded() {
             plan.stroke_count()
         );
         assert!(secs < 120.0, "{:?} would take {secs:.0}s", calib.model);
+    }
+}
+
+/// Simplifying the strokes is what pays for tracing at the panel's own
+/// resolution: the raw trace puts a point on every pixel, and the event
+/// encoder re-samples at the digitizer's step, which is several pixels wide.
+/// If simplification ever stopped happening the drawing would still be
+/// correct and would take some five times as long — a regression with no
+/// symptom other than tedium, so it gets a number.
+#[test]
+fn simplification_pays_for_the_resolution() {
+    for calib in [PAPER_PRO, RM2] {
+        let plan = draw::plan(&test_image(), &calib).unwrap();
+        let emitted = decode(&calib, &plan.bytes).len();
+        // The test card is ~2900px of ink once placed on the page; at one
+        // sample per digitizer step that is a few thousand points, where the
+        // unsimplified trace would be a few tens of thousands.
+        assert!(
+            emitted < 12_000,
+            "{:?}: {emitted} samples — simplification is not running",
+            calib.model
+        );
     }
 }
 
@@ -300,16 +323,19 @@ fn preview_tracks_the_strokes_being_drawn() {
         assert_eq!(drawn.len(), plan.stroke_count());
 
         // Pen space differs per model and preview space is the image's own
-        // frame, so compare each stroke's centroid normalised into the *whole
-        // drawing's* bounding box — that cancels both frames out and still
-        // catches a reordering, an axis swap or a flip.
+        // frame, so compare where each stroke *starts and ends*, normalised
+        // into the whole drawing's bounding box — that cancels both frames out
+        // and still catches a reordering, an axis swap or a flip.
+        //
+        // Endpoints rather than centroids, which is what this used to compare.
+        // A centroid is only comparable between two samplings of a stroke when
+        // both are evenly spaced, and neither of these is any more: the preview
+        // is simplified by deviation, so its points cluster where the stroke
+        // bends, while the drawn one is re-sampled evenly at the digitizer's
+        // step. The first and last point, by contrast, are exact in both.
         let screen = |&(x, y): &(i32, i32)| match calib.model {
             Model::Rm2 => (y as f64 / calib.max_y, 1.0 - x as f64 / calib.max_x),
             Model::PaperPro => (x as f64 / calib.max_x, y as f64 / calib.max_y),
-        };
-        let centroids = |pts: Vec<(f64, f64)>| {
-            let n = pts.len() as f64;
-            (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n)
         };
         let norm = |cs: Vec<(f64, f64)>| {
             let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
@@ -322,25 +348,40 @@ fn preview_tracks_the_strokes_being_drawn() {
             cs.iter().map(|&(x, y)| ((x - x0) / (x1 - x0), (y - y0) / (y1 - y0))).collect::<Vec<_>>()
         };
 
-        let a = norm(drawn.iter().map(|s| centroids(s.iter().map(screen).collect())).collect());
+        let a = norm(
+            drawn
+                .iter()
+                .flat_map(|s| [screen(&s[0]), screen(s.last().unwrap())])
+                .collect(),
+        );
         let b = norm(
             plan.preview
                 .iter()
-                .map(|s| centroids(s.iter().map(|&[x, y]| (x as f64, y as f64)).collect()))
+                .flat_map(|s| {
+                    let end = *s.last().unwrap();
+                    [s[0], end].map(|[x, y]| (x as f64, y as f64))
+                })
                 .collect(),
         );
         for (i, (p, q)) in a.iter().zip(&b).enumerate() {
             let d = ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt();
-            assert!(d < 0.02, "{:?}: stroke {i} sits at {p:?} but previews at {q:?}", calib.model);
+            assert!(
+                d < 0.01,
+                "{:?}: stroke {}'s {} end is at {p:?} but previews at {q:?}",
+                calib.model,
+                i / 2,
+                if i % 2 == 0 { "start" } else { "finish" }
+            );
         }
 
-        // Decimation must not empty a stroke out — a preview stroke of one
-        // point draws nothing — and must actually decimate, since the whole
-        // preview crosses the IPC boundary in one message.
-        assert!(plan.preview.iter().all(|s| s.len() >= 2), "{:?}: decimated a stroke away", calib.model);
+        // Simplifying must not empty a stroke out — a preview stroke of one
+        // point draws nothing — and must stay well under what is drawn, since
+        // the whole preview crosses the IPC boundary in one message and the
+        // window it lands in is a hundred pixels across.
+        assert!(plan.preview.iter().all(|s| s.len() >= 2), "{:?}: simplified a stroke away", calib.model);
         let (kept, traced): (usize, usize) =
             (plan.preview.iter().map(|s| s.len()).sum(), drawn.iter().map(|s| s.len()).sum());
-        assert!(kept * 2 < traced, "{:?}: decimation kept {kept} of {traced} points", calib.model);
+        assert!(kept * 2 < traced, "{:?}: preview kept {kept} of {traced} points", calib.model);
     }
 }
 

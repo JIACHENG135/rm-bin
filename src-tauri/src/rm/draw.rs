@@ -26,12 +26,54 @@ use crate::rm::imageproc;
 use crate::rm::rmfile;
 use image::GenericImageView;
 
-/// Longer edge of the raster we trace on. Bigger keeps more detail but costs
-/// stroke points, and every point is ~4 input events crawling down an SSH
-/// pipe at digitizer pace — this is really a drawing-time dial.
-pub(crate) const BASE_WORK: f64 = 700.0;
-/// Past this the draw takes minutes, so retrace smaller instead.
-const MAX_STROKE_POINTS: usize = 14_000;
+/// A representative long edge for the raster the tracer works on.
+///
+/// Not the tracing resolution itself, which `page_fit` derives per image and
+/// per device — it depends on the page, and on whether the picture is portrait
+/// or landscape, and lands somewhere between about 1100 and 1700. This is the
+/// middle of that range, and it exists because `gemini`'s prompt describes the
+/// machine its drawing is about to go through and has to quote a real number
+/// when it says how small a detail will survive.
+pub(crate) const BASE_WORK: f64 = 1300.0;
+
+/// How far a simplified stroke may sit from the points it replaces, in raster
+/// pixels — which, since the raster is now the size the drawing will be, are
+/// screen pixels.
+///
+/// Under one pixel is beneath both what the panel resolves and what the pen's
+/// own width covers, so this is invisible in the ink. What it buys is
+/// substantial: a traced skeleton is a staircase with a point on every pixel,
+/// and `stroke_events` re-samples whatever it is handed at the digitizer's
+/// step — some five screen pixels — so the raw trace asks for five events
+/// where one will do.
+const EPSILON: f64 = 0.9;
+/// Where simplifying stops being free. Past about three pixels the corners of
+/// small glyphs start to round off, and by then it has stopped helping anyway:
+/// once every segment is longer than the digitizer's step, the event count is
+/// set by the total length of the ink and no amount of further simplification
+/// moves it.
+const EPSILON_MAX: f64 = 3.0;
+/// Barbs of up to this many pixels hanging off a junction are skeletonizing
+/// artefacts rather than marks. Real short strokes — the dot of an "i", a 点 —
+/// don't touch a junction, and `prune_spurs` only cuts the ones that do.
+const MAX_SPUR: usize = 4;
+/// How far above its own resolution a source may be traced. See `page_fit`.
+const MAX_UPSCALE: f64 = 2.0;
+
+/// Roughly how many pen samples a drawing may cost.
+///
+/// This replaces a cap on traced points, which measured the wrong thing: the
+/// tablet is handed events at a fixed pace, and the events are produced by
+/// re-sampling the strokes at the digitizer's step, so what a drawing costs is
+/// the *length of its ink*, not how many points described it. Capping points
+/// meant a densely traced image was punished for its detail and then had that
+/// detail destroyed to pay the bill.
+const MAX_PEN_SAMPLES: usize = 24_000;
+/// The `.rm` path writes a file instead of replaying a pen, so nothing is
+/// paced and the only cost is the tablet's own rendering. Still finite —
+/// xochitl gets sluggish on pages with a huge number of points.
+const MAX_FILE_SAMPLES: usize = 120_000;
+
 /// Blank margin left around the image, as a fraction of the screen.
 ///
 /// This is a safety margin as much as an aesthetic one. xochitl's toolbar is
@@ -51,9 +93,11 @@ const BANDS: usize = 64;
 /// N is well past what a ~100px window can resolve, and keeps each number to
 /// four digits of JSON.
 const PREVIEW_UNITS: u16 = 2000;
-/// Preview points closer together than this (as a fraction of image height)
-/// are dropped.
-const PREVIEW_EPSILON: f64 = 1.0 / 400.0;
+/// How far a preview stroke may sit from the stroke it stands for, as a
+/// fraction of the image height. The window's screen is barely 100 pixels
+/// across, so this is a third of a pixel there — invisible, and it takes a
+/// long straight stroke down to the two points it deserves.
+const PREVIEW_EPSILON: f64 = 1.0 / 250.0;
 
 type Poly = Vec<(f64, f64)>;
 
@@ -93,53 +137,140 @@ impl Plan {
     }
 }
 
+/// The raster to trace on: the size the image will actually occupy on the
+/// page, in screen pixels.
+///
+/// This used to be a constant 700 on the long edge, which is roughly half the
+/// panel — so every image was thrown away down to half resolution before
+/// anything looked at it, and text was the casualty. Small type survives
+/// binarization or it doesn't, and at half size it doesn't: adjacent strokes
+/// of a hanzi land in the same pixel, merge, and skeletonize to a blob. There
+/// is nothing further down the pipeline that can recover a glyph that was
+/// already illegible in the mask.
+///
+/// The page's own size is the natural stopping point in the other direction.
+/// Below it, detail is thrown away that the panel could have shown; above it,
+/// detail is traced that the panel cannot show and the pen cannot draw, and
+/// paid for in drawing time.
+///
+/// The source is the other ceiling. A small image blown up to page size has no
+/// more detail in it than it started with, only more pixels describing the
+/// same edges — so past a modest enlargement the extra raster is pure cost.
+/// Some enlargement does help: it gives the resampler room to put an edge
+/// between two source pixels instead of on one, and a diagonal traced at the
+/// source's own resolution arrives as a staircase with steps you can see once
+/// it is drawn at four times the size.
+fn page_fit(src_w: u32, src_h: u32, calib: &Calib) -> (f64, f64) {
+    let aspect = src_w as f64 / src_h as f64;
+    let avail_w = calib.screen_w * (1.0 - 2.0 * MARGIN);
+    let avail_h = calib.screen_h * (1.0 - 2.0 * MARGIN);
+    // Same uniform fit `placement` will do, so the two agree and the scale
+    // between raster pixels and screen pixels comes out at one.
+    let w = avail_w.min(avail_h * aspect).min(MAX_UPSCALE * src_w as f64);
+    (w.max(1.0), (w / aspect).max(1.0))
+}
+
+/// What a set of strokes will cost to draw, in pen samples.
+///
+/// Mirrors `device::stroke_events` exactly: one sample to start a stroke, then
+/// one for each digitizer step along each segment. It is the honest predictor
+/// of drawing time, and — unlike a count of traced points — it is what
+/// simplifying the strokes actually reduces.
+fn cost(strokes: &[Poly], work_w: f64, work_h: f64, calib: &Calib) -> usize {
+    let to_screen = placement(work_w, work_h, calib);
+    strokes
+        .iter()
+        .map(|s| {
+            let mut n = 0usize;
+            let mut prev: Option<(f64, f64)> = None;
+            for &p in s {
+                let (u, v) = to_screen(p);
+                let q = calib.pen_from_screen(u, v);
+                n += match prev {
+                    None => 1,
+                    Some((x0, y0)) => {
+                        let d = (q.0 - x0).abs().max((q.1 - y0).abs());
+                        ((d / device::STEP as f64) as usize).max(1)
+                    }
+                };
+                prev = Some(q);
+            }
+            n
+        })
+        .sum()
+}
+
 /// Trace an image and put its strokes in drawing order, in work-raster
 /// coordinates. Shared by both outputs — the pen replay and the `.rm` writer
-/// differ only in what they map these onto, so tracing, the retry-smaller
-/// loop and the band ordering all live here.
-fn trace_and_order(image_path: &str) -> Result<(Vec<Poly>, f64, f64), String> {
+/// differ only in what they map these onto and in what they can afford, so
+/// tracing, simplification and the band ordering all live here.
+fn trace_and_order(
+    image_path: &str,
+    calib: &Calib,
+    budget: usize,
+) -> Result<(Vec<Poly>, f64, f64), String> {
     let img = image::open(image_path).map_err(|e| format!("读不了这张图：{e}"))?;
     let (src_w, src_h) = img.dimensions();
     if src_w == 0 || src_h == 0 {
         return Err("这张图是空的".into());
     }
 
-    // Work raster keeps the source aspect ratio, so its pixels stay square in
-    // screen space and the placement is a plain uniform scale.
-    let aspect = src_w as f64 / src_h as f64;
-    let (mut work_w, mut work_h) = if aspect >= 1.0 {
-        (BASE_WORK, BASE_WORK / aspect)
-    } else {
-        (BASE_WORK * aspect, BASE_WORK)
-    };
+    let (mut work_w, mut work_h) = page_fit(src_w, src_h, calib);
 
-    let strokes = loop {
-        let (w, h) = (work_w.max(1.0) as u32, work_h.max(1.0) as u32);
-        let resized = img.resize_exact(w, h, image::imageops::FilterType::Triangle);
-        let gray = resized.to_luma8();
-        let threshold = imageproc::otsu_threshold(gray.as_raw());
-        let mask = imageproc::threshold_mask(gray.as_raw(), w as usize, h as usize, threshold);
-        let traced = imageproc::trace_skeleton(&imageproc::skeletonize(&mask));
-        let points: usize = traced.iter().map(|s| s.len()).sum();
-        if points <= MAX_STROKE_POINTS || work_h <= 80.0 {
-            work_w = w as f64;
-            work_h = h as f64;
-            break traced;
+    loop {
+        let (w, h) = (work_w as u32, work_h as u32);
+        // Lanczos rather than a triangle filter: it is downscaling by a large
+        // factor and what has to survive is edge contrast, since the very next
+        // step is a threshold. A triangle filter's soft edges are what puts a
+        // glyph's strokes into the same grey band as the paper between them.
+        let gray = img
+            .resize_exact(w, h, image::imageops::FilterType::Lanczos3)
+            .to_luma8();
+        let mask = imageproc::adaptive_threshold_mask(gray.as_raw(), w as usize, h as usize);
+        let skeleton = imageproc::prune_spurs(&imageproc::skeletonize(&mask), MAX_SPUR);
+        let raw: Vec<Poly> = imageproc::trace_skeleton(&skeleton)
+            .iter()
+            .map(|s| s.iter().map(|&(x, y)| (x as f64, y as f64)).collect())
+            .collect();
+        (work_w, work_h) = (w as f64, h as f64);
+
+        if raw.is_empty() {
+            return Err("这张图里找不到可以描的线条".into());
         }
-        work_w *= 0.75;
-        work_h *= 0.75;
-    };
 
-    if strokes.is_empty() {
-        return Err("这张图里找不到可以描的线条".into());
+        // Simplify as little as the budget allows: `EPSILON` is already below
+        // what the ink can show, so anything beyond it is a concession.
+        let mut epsilon = EPSILON;
+        let mut strokes = simplify_all(&raw, epsilon);
+        while cost(&strokes, work_w, work_h, calib) > budget && epsilon < EPSILON_MAX {
+            epsilon = (epsilon * 1.5).min(EPSILON_MAX);
+            strokes = simplify_all(&raw, epsilon);
+        }
+
+        // Only once simplification has run out does the raster give way. It
+        // costs real detail, so it is the last resort rather than the first:
+        // a smaller raster finds fewer separate marks, which is the only way
+        // left to shorten a drawing whose ink is simply very long.
+        if cost(&strokes, work_w, work_h, calib) <= budget || work_h <= 80.0 {
+            return Ok((order_by_band(strokes, work_h, BANDS), work_w, work_h));
+        }
+        work_w = (work_w * 0.75).max(1.0);
+        work_h = (work_h * 0.75).max(1.0);
     }
-    Ok((order_by_band(&strokes, work_h, BANDS), work_w, work_h))
+}
+
+/// Simplify every stroke, dropping any that no longer describes a line.
+fn simplify_all(raw: &[Poly], epsilon: f64) -> Vec<Poly> {
+    raw.iter()
+        .map(|s| imageproc::simplify(s, epsilon))
+        .filter(|s| s.len() >= 2)
+        .collect()
 }
 
 /// Trace `image_path` and lay it out centered on `calib`'s page, as pen
 /// digitizer events to be replayed.
 pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
-    let (ordered, work_w, work_h) = trace_and_order(image_path)?;
+    let (ordered, work_w, work_h) = trace_and_order(image_path, calib, MAX_PEN_SAMPLES)?;
     let to_screen = placement(work_w, work_h, calib);
 
     // Stroke events only — `push` frames the pen session around them, so
@@ -180,7 +311,7 @@ pub struct Page {
 /// and placement as `plan`, but in page coordinates (x from the centre, y
 /// from the top, both in screen pixels) instead of pen digitizer units.
 pub fn page(image_path: &str, calib: &Calib) -> Result<Page, String> {
-    let (ordered, work_w, work_h) = trace_and_order(image_path)?;
+    let (ordered, work_w, work_h) = trace_and_order(image_path, calib, MAX_FILE_SAMPLES)?;
     let to_screen = placement(work_w, work_h, calib);
     Ok(Page {
         strokes: ordered
@@ -205,26 +336,23 @@ pub fn page(image_path: &str, calib: &Calib) -> Result<Page, String> {
     })
 }
 
-/// Quantised, decimated copy of a stroke in the image's own frame, for the
-/// window to draw. The window's screen is barely 100px across, so trace
-/// resolution is wasted there — dropping points closer together than
-/// `PREVIEW_EPSILON` cuts the payload several-fold and changes nothing you
-/// can see.
+/// Quantised, simplified copy of a stroke in the image's own frame, for the
+/// window to draw.
+///
+/// The whole preview crosses the IPC boundary in one message, and the window's
+/// screen is barely 100px across, so trace resolution is doubly wasted here.
+/// Simplified by deviation rather than thinned by spacing: dropping every
+/// point within a fixed distance of the last one kept would cut the corner off
+/// a tight curve, whereas this leaves a curve exactly as bent as it was and
+/// still takes a straight stroke down to its two ends.
 fn to_preview(stroke: &Poly, work_w: f64, work_h: f64) -> PreviewStroke {
     let q = |x: f64, span: f64| {
         ((x / span).clamp(0.0, 1.0) * PREVIEW_UNITS as f64).round() as u16
     };
-    let mut out: PreviewStroke = Vec::new();
-    let mut last = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for (i, &(x, y)) in stroke.iter().enumerate() {
-        let far = ((x - last.0).powi(2) + (y - last.1).powi(2)).sqrt()
-            > PREVIEW_EPSILON * work_h;
-        if i + 1 == stroke.len() || far {
-            out.push([q(x, work_w), q(y, work_h)]);
-            last = (x, y);
-        }
-    }
-    out
+    imageproc::simplify(stroke, PREVIEW_EPSILON * work_h)
+        .into_iter()
+        .map(|(x, y)| [q(x, work_w), q(y, work_h)])
+        .collect()
 }
 
 /// Uniform fit of the work raster into the page, centered, with a margin —
@@ -259,13 +387,12 @@ fn placement(work_w: f64, work_h: f64, calib: &Calib) -> impl Fn((f64, f64)) -> 
 /// pieces came out visibly scalloped. Now that the window follows the strokes
 /// instead of the other way round, nothing needs cutting and this is only
 /// about the drawing looking deliberate.
-fn order_by_band(strokes: &[Vec<(i32, i32)>], work_h: f64, bands: usize) -> Vec<Poly> {
+fn order_by_band(strokes: Vec<Poly>, work_h: f64, bands: usize) -> Vec<Poly> {
     let band_h = (work_h / bands as f64).max(1.0);
     let band_of = |y: f64| ((y / band_h) as usize).min(bands - 1);
 
     let mut buckets: Vec<Vec<Poly>> = vec![Vec::new(); bands];
-    for stroke in strokes {
-        let pts: Poly = stroke.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
+    for pts in strokes {
         let top = pts.iter().map(|&(_, y)| band_of(y)).min().unwrap_or(0);
         buckets[top].push(pts);
     }

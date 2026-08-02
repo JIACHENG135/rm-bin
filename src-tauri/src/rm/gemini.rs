@@ -42,14 +42,18 @@ const MODEL: &str = "gemini-3.1-flash-image";
 ///
 /// `work_px` is `draw::BASE_WORK` rather than a number typed twice: the size
 /// floor below which strokes fuse is a consequence of that raster, and a
-/// prompt claiming a different one would be quietly lying to the model.
+/// prompt claiming a different one would be quietly lying to the model. The
+/// real raster is chosen per image and per device, so what is quoted is the
+/// middle of its range — the model is being asked for a margin of safety, not
+/// for a computation.
 pub(crate) fn prompt(work_px: u32) -> String {
     format!(
         "Redraw this photograph as line art that a pen will physically draw, stroke by \
 stroke, on an e-ink tablet.\n\n\
 Here is exactly what happens to your image afterwards, so you can reason about what \
-will survive it: it is downscaled to about {work_px} pixels on its longest edge, \
-converted to black and white by Otsu thresholding, thinned to a 1-pixel-wide \
+will survive it: it is rescaled to about {work_px} pixels on its longest edge, \
+converted to black and white by Otsu thresholding of the illumination-corrected \
+image, thinned to a 1-pixel-wide \
 centreline skeleton (Zhang-Suen), and that skeleton is walked into ordered pen strokes \
 — starting from endpoints, following connected pixels, and taking the \
 straightest-continuing branch wherever a pixel has more than one unvisited neighbour.\n\n\
