@@ -177,14 +177,34 @@ pub enum Delivered {
 /// is a question with a fast, definitive answer and no setting can be as
 /// accurate as asking.
 pub fn deliver(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<Delivered, String> {
-    match upload(host, name, pdf) {
-        Ok(()) => Ok(Delivered::WebInterface),
-        Err(web_err) => match install_over_ssh(host, port, name, pdf) {
-            Ok(()) => Ok(Delivered::Ssh),
-            // Report both: one of them is the reason, and which one depends
-            // on a setup detail only the person in front of the tablet knows.
-            Err(ssh_err) => Err(format!("{ssh_err}\n（网页接口也不通：{web_err}）")),
-        },
+    let mut web_err = String::new();
+    for candidate in web_hosts(host) {
+        match upload(&candidate, name, pdf) {
+            Ok(()) => return Ok(Delivered::WebInterface),
+            Err(e) => web_err = e,
+        }
+    }
+    match install_over_ssh(host, port, name, pdf) {
+        Ok(()) => Ok(Delivered::Ssh),
+        // Report both: one of them is the reason, and which one depends on a
+        // setup detail only the person in front of the tablet knows.
+        Err(ssh_err) => Err(format!("{ssh_err}\n（网页接口也不通：{web_err}）")),
+    }
+}
+
+/// Where the web interface might be answering.
+///
+/// The configured address is the *ssh* address, and the web interface's is
+/// not the same question: it only exists while the USB gadget is up, and
+/// there it is always 10.11.99.1. So a tablet configured over wifi still gets
+/// the no-restart path the moment a cable is plugged in, without anyone
+/// having to go and change a setting to make that happen.
+pub(crate) fn web_hosts(host: &str) -> Vec<String> {
+    const USB: &str = "10.11.99.1";
+    if host == USB {
+        vec![USB.to_string()]
+    } else {
+        vec![host.to_string(), USB.to_string()]
     }
 }
 
@@ -250,15 +270,41 @@ pub(crate) fn content(size: usize) -> String {
 /// subprocess, in an app that already spawns `ssh` for everything else, would
 /// be effort spent in the wrong place.
 pub fn upload(host: &str, name: &str, pdf: &[u8]) -> Result<(), String> {
+    // The endpoint uploads "to the last folder that was listed" — it is
+    // stateful, and a POST with no listing before it has no defined
+    // destination. So ask for the root folder first, which both fixes the
+    // target and is a cheap way to find out whether anything is there at all.
+    let base = format!("http://{host}");
+    let probe = Command::new("curl")
+        // Short: this runs on a host that is usually not there, and the whole
+        // point of trying it is that failing costs nothing.
+        .args(["--silent", "--show-error", "--max-time", "4", "--connect-timeout", "2"])
+        .arg(format!("{base}/documents/"))
+        .output()
+        .map_err(|e| format!("无法启动 curl：{e}"))?;
+    if !probe.status.success() {
+        let err = String::from_utf8_lossy(&probe.stderr);
+        let err = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        return Err(format!("网页接口不可达（{base}）：{err}"));
+    }
+
     let path = std::env::temp_dir().join(format!("{name}.pdf"));
     std::fs::write(&path, pdf).map_err(|e| format!("无法写入临时文件：{e}"))?;
 
-    let url = format!("http://{host}/upload");
+    // The headers are the ones the interface's own page sends. It is served
+    // by qtwebapp and may well not check them, but a request that looks like
+    // the browser's is one fewer thing to be wrong about.
     let out = Command::new("curl")
-        .args(["--silent", "--show-error", "--max-time", "120", "-X", "POST"])
+        .args(["--silent", "--show-error", "--max-time", "120"])
+        .args(["-H", &format!("Origin: {base}")])
+        .args(["-H", &format!("Referer: {base}/")])
+        .args(["-H", "Accept: */*"])
         .arg("-F")
-        .arg(format!("file=@{};type=application/pdf", path.display()))
-        .arg(&url)
+        .arg(format!(
+            "file=@{};filename={name}.pdf;type=application/pdf",
+            path.display()
+        ))
+        .arg(format!("{base}/upload"))
         .output();
     let _ = std::fs::remove_file(&path);
 
@@ -266,10 +312,7 @@ pub fn upload(host: &str, name: &str, pdf: &[u8]) -> Result<(), String> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        return Err(format!(
-            "连不上设备的网页接口（{url}）：{err}。\
-             请在设备上打开「设置 › 通用 › 存储 › USB 网页界面」，并用 USB 线连接（地址 10.11.99.1）"
-        ));
+        return Err(format!("上传请求失败（{base}/upload）：{err}"));
     }
     check_reply(&String::from_utf8_lossy(&out.stdout))
 }

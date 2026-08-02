@@ -156,6 +156,17 @@ fn an_unreadable_file_is_an_error() {
     assert!(pdf::build("/nonexistent/nope.png").is_err());
 }
 
+/// The web interface lives at a different address from ssh — it exists only
+/// while the USB gadget is up, and there it is always 10.11.99.1. So a tablet
+/// configured over wifi must still try the USB address, or plugging a cable
+/// in would not get you the no-restart path without also editing a setting.
+#[test]
+fn the_usb_address_is_tried_even_when_configured_for_wifi() {
+    assert_eq!(pdf::web_hosts("10.0.0.113"), ["10.0.0.113", "10.11.99.1"]);
+    // ...and not twice when they are the same.
+    assert_eq!(pdf::web_hosts("10.11.99.1"), ["10.11.99.1"]);
+}
+
 /// The `.content` beside an imported PDF is what tells xochitl it is a PDF at
 /// all; get it wrong and the document appears in the library and opens empty.
 #[test]
