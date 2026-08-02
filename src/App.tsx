@@ -164,10 +164,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const quit = async () => {
+  /* right-click pops a real NSMenu — no chrome lives on the sheet itself */
+  const contextMenu = async () => {
     if (!IS_TAURI) return;
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().close();
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("show_context_menu");
   };
 
   const armed = phase === "armed";
@@ -209,6 +210,10 @@ export default function App() {
       className="wrap"
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        contextMenu();
+      }}
     >
       <motion.div
         className="fade"
@@ -389,22 +394,6 @@ export default function App() {
       </motion.div>
       </motion.div>
 
-      {/* quit — only on hover */}
-      <AnimatePresence>
-        {hover && IS_TAURI && !job && (
-          <motion.button
-            className="quit"
-            onClick={quit}
-            title="退出"
-            initial={{ opacity: 0, scale: 0.6 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.6 }}
-            transition={{ duration: 0.15 }}
-          >
-            ✕
-          </motion.button>
-        )}
-      </AnimatePresence>
     </div>
   );
 }

@@ -246,24 +246,13 @@ body {
   pointer-events: none;
 }
 
-/* ————— quit ————— */
-.quit {
-  appearance: none;
-  border: none;
-  position: absolute;
-  top: 2px;
-  right: 6px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  background: rgba(60, 60, 67, 0.55);
-  color: #fff;
-  font-size: 9px;
-  line-height: 1;
-  cursor: pointer;
+/* ————— hover affordance —————
+   no buttons live on the sheet: settings and quit are in the right-click
+   menu. Hovering only nudges the Marker out a hair, the way a pen shifts
+   when you pick up the device — enough to read as "this thing responds". */
+.wrap:hover .pen {
+  transform: translateX(1.5px);
 }
-.quit:hover {
-  background: rgba(60, 60, 67, 0.85);
+.pen {
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
 }

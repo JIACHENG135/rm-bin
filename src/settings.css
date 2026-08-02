@@ -1,0 +1,281 @@
+/* RM Bin — settings, in the macOS System Settings idiom */
+
+:root {
+  /* AppKit light, over an NSVisualEffectView — surfaces stay translucent
+     so the material behind the window keeps showing through */
+  --card: rgba(255, 255, 255, 0.3);
+  --label: rgba(0, 0, 0, 0.85);
+  --secondary: rgba(60, 60, 67, 0.6);
+  --tertiary: rgba(60, 60, 67, 0.35);
+  --separator: rgba(60, 60, 67, 0.13);
+  --field-bg: rgba(255, 255, 255, 0.6);
+  --field-border: rgba(0, 0, 0, 0.22);
+  --btn-bg: linear-gradient(180deg, #ffffff 0%, #fdfdfd 100%);
+  --btn-border: rgba(0, 0, 0, 0.16);
+  --accent: #007aff;
+  --accent-ring: rgba(0, 122, 255, 0.32);
+  --green: #34c759;
+  --red: #ff3b30;
+  --footer-bg: transparent;
+  --veil: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --card: rgba(255, 255, 255, 0.04);
+    --label: rgba(255, 255, 255, 0.92);
+    --secondary: rgba(235, 235, 245, 0.6);
+    --tertiary: rgba(235, 235, 245, 0.3);
+    --separator: rgba(255, 255, 255, 0.1);
+    --field-bg: rgba(255, 255, 255, 0.09);
+    --field-border: rgba(255, 255, 255, 0.16);
+    --btn-bg: linear-gradient(180deg, #5b5b5f 0%, #4e4e52 100%);
+    --btn-border: rgba(0, 0, 0, 0.5);
+    --accent: #0a84ff;
+    --accent-ring: rgba(10, 132, 255, 0.4);
+    --green: #30d158;
+    --red: #ff453a;
+    --footer-bg: transparent;
+    --veil: transparent;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--label);
+  background: transparent; /* the NSVisualEffectView is the background */
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+.prefs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--veil);
+}
+
+.content {
+  flex: 1;
+  padding: 18px 20px 0;
+  overflow: hidden;
+}
+
+/* ————— group ————— */
+.group-title {
+  font-size: 13px;
+  font-weight: 590; /* SF's semibold-ish */
+  letter-spacing: -0.005em;
+  margin: 0 0 7px 2px;
+}
+
+.group {
+  background: var(--card);
+  border-radius: 8px;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05);
+  /* a second, tighter blur on top of the window material: the card reads as
+     glass over glass, the way stacked sheets do in AppKit */
+  backdrop-filter: saturate(140%) blur(6px);
+}
+@media (prefers-color-scheme: dark) {
+  .group {
+    box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  }
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px;
+}
+
+/* right-aligned label column, as in a macOS preference pane */
+.row-label {
+  width: 52px;
+  flex: none;
+  text-align: right;
+  color: var(--label);
+}
+
+.row-hint {
+  color: var(--tertiary);
+  font-size: 11px;
+}
+
+.separator {
+  height: 0.5px;
+  margin-left: 12px;
+  background: var(--separator);
+}
+
+/* ————— text field ————— */
+.field {
+  font: inherit;
+  color: var(--label);
+  background: var(--field-bg);
+  border: 0.5px solid var(--field-border);
+  border-radius: 6px;
+  height: 22px;
+  padding: 0 6px;
+  width: 156px;
+  user-select: text;
+  -webkit-user-select: text;
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 0.12s ease, border-color 0.12s ease;
+}
+.field.narrow {
+  width: 62px;
+}
+.field.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+.field::placeholder {
+  color: var(--tertiary);
+}
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.field.invalid {
+  border-color: var(--red);
+}
+.field.invalid:focus {
+  box-shadow: 0 0 0 3px rgba(255, 59, 48, 0.28);
+}
+
+/* ————— connection status ————— */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  color: var(--secondary);
+  font-variant-numeric: tabular-nums;
+}
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tertiary);
+  flex: none;
+}
+.status.ok {
+  color: var(--label);
+}
+.status.ok .dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent);
+}
+.status.fail .dot {
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent);
+}
+
+.spinner {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--tertiary);
+  border-top-color: var(--secondary);
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ————— buttons ————— */
+.button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--label);
+  background: var(--btn-bg);
+  border: 0.5px solid var(--btn-border);
+  border-radius: 6px;
+  height: 22px;
+  padding: 0 11px;
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.09);
+  cursor: default;
+  white-space: nowrap;
+  transition: filter 0.1s ease;
+}
+.button:active {
+  filter: brightness(0.94);
+}
+.button:disabled {
+  opacity: 0.45;
+}
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.button.default {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 92%, white) 0%,
+    var(--accent) 100%
+  );
+  border-color: transparent;
+  color: #fff;
+  min-width: 68px;
+}
+
+.button.plain {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--secondary);
+  padding: 0 4px;
+}
+.button.plain:hover {
+  color: var(--label);
+}
+
+/* ————— footnote ————— */
+.footnote {
+  margin: 8px 4px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--secondary);
+  /* two lines reserved, so swapping help text for an error never shifts the card */
+  min-height: 31px;
+}
+.footnote.error {
+  color: var(--red);
+}
+
+/* ————— footer ————— */
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px 14px;
+  background: var(--footer-bg);
+  border-top: 0.5px solid var(--separator);
+}
