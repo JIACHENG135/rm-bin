@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RM Bin — 拖一张图进去，它出现在你的 reMarkable 上</title>
+<meta name="description" content="一枚悬浮在桌面上的迷你 reMarkable Paper Pro。把图片拖上去，它就画到你的设备上。macOS 原生，开源。" />
+<meta property="og:title" content="RM Bin" />
+<meta property="og:description" content="拖一张图进去，它出现在你的 reMarkable 上。" />
+<meta property="og:type" content="website" />
+<style>
+  :root {
+    --paper: #eeede7;
+    --paper-deep: #e7e6e0;
+    --ink: #1c1c1e;
+    --ink-soft: rgba(28, 28, 30, 0.62);
+    --ink-faint: rgba(28, 28, 30, 0.38);
+    --rule: rgba(28, 28, 30, 0.13);
+    --card: rgba(255, 255, 255, 0.5);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #16150f;
+      --paper-deep: #100f0b;
+      --ink: #ecebe3;
+      --ink-soft: rgba(236, 235, 227, 0.6);
+      --ink-faint: rgba(236, 235, 227, 0.34);
+      --rule: rgba(236, 235, 227, 0.14);
+      --card: rgba(255, 255, 255, 0.04);
+    }
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.035 0'/></filter><rect width='140' height='140' filter='url(%23n)'/></svg>"),
+      linear-gradient(172deg, var(--paper) 0%, var(--paper-deep) 100%);
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    font-size: 16px;
+    line-height: 1.72;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ————— 页眉：像设备上的页眉一样安静 ————— */
+  header { padding: 5.5rem 0 0; }
+  .wordmark {
+    font-family: Georgia, "Songti SC", "Times New Roman", serif;
+    font-size: 1.05rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+  }
+
+  h1 {
+    font-family: Georgia, "Songti SC", "Times New Roman", serif;
+    font-weight: 400;
+    font-size: clamp(1.9rem, 5.2vw, 2.9rem);
+    line-height: 1.28;
+    letter-spacing: -0.005em;
+    margin: 1.6rem 0 1.1rem;
+  }
+  .lede { font-size: 1.06rem; color: var(--ink-soft); max-width: 33rem; }
+
+  /* ————— 主视觉：那台小设备 ————— */
+  .stage {
+    display: flex;
+    justify-content: center;
+    padding: 3.2rem 0 1rem;
+  }
+  .device {
+    width: 112px;
+    height: auto;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.16)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.14));
+    animation: breathe 3.4s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50%      { transform: translateY(-5px) scale(1.02); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .device { animation: none; }
+  }
+
+  /* ————— 下载 ————— */
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.9rem 1.4rem;
+    padding: 2.2rem 0 0;
+  }
+  .download {
+    display: inline-block;
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--paper);
+    background: var(--ink);
+    padding: 0.62rem 1.35rem;
+    border-radius: 7px;
+    text-decoration: none;
+    transition: transform 0.18s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.18s;
+  }
+  .download:hover { transform: translateY(-1px); opacity: 0.88; }
+  .meta { font-size: 0.85rem; color: var(--ink-faint); }
+  .meta a { color: var(--ink-soft); }
+
+  /* ————— 分节：用设备上的横线做分隔 ————— */
+  .rules { padding: 4.5rem 0 0; }
+  .rules i {
+    display: block;
+    height: 1px;
+    background: var(--rule);
+    margin-bottom: 11px;
+  }
+  .rules i:nth-child(2) { margin-right: 22%; }
+  .rules i:nth-child(3) { margin-right: 46%; }
+
+  h2 {
+    font-family: Georgia, "Songti SC", "Times New Roman", serif;
+    font-weight: 400;
+    font-size: 1.5rem;
+    letter-spacing: -0.003em;
+    margin: 2.6rem 0 1rem;
+  }
+  p + p { margin-top: 1rem; }
+  p { color: var(--ink-soft); }
+  strong { color: var(--ink); font-weight: 600; }
+
+  /* ————— 三步 ————— */
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 1.8rem;
+    margin: 2rem 0 0;
+  }
+  .step h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  .step .n {
+    font-family: Georgia, serif;
+    font-size: 0.82rem;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 0.45rem;
+  }
+  .step p { font-size: 0.92rem; line-height: 1.62; }
+
+  /* ————— 图 ————— */
+  figure { margin: 2.2rem 0 0; }
+  figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 12px 30px rgba(0, 0, 0, 0.13);
+  }
+  figcaption {
+    font-size: 0.82rem;
+    color: var(--ink-faint);
+    margin-top: 0.8rem;
+    text-align: center;
+  }
+
+  /* ————— 模式表 ————— */
+  .modes { margin: 1.8rem 0 0; }
+  .mode {
+    display: flex;
+    gap: 1rem;
+    padding: 0.9rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .mode:last-child { border-bottom: 1px solid var(--rule); }
+  .mode dt {
+    flex: none;
+    width: 9.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .mode dd { font-size: 0.92rem; line-height: 1.6; color: var(--ink-soft); }
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.05rem 0.4rem;
+    margin-left: 0.4rem;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+
+  /* ————— 安装 ————— */
+  pre {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.82rem;
+    line-height: 1.7;
+    color: var(--ink);
+    margin: 1.2rem 0;
+  }
+  ul { margin: 1rem 0 0 1.1rem; color: var(--ink-soft); }
+  li { margin-bottom: 0.45rem; }
+  li::marker { color: var(--ink-faint); }
+
+  a { color: var(--ink); text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--ink-faint); }
+
+  footer {
+    padding: 4rem 0 5rem;
+    margin-top: 3.5rem;
+    border-top: 1px solid var(--rule);
+    font-size: 0.85rem;
+    color: var(--ink-faint);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+  }
+  footer .brand {
+    font-family: Georgia, "Times New Roman", serif;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="wordmark">RM Bin</div>
+    <h1>拖一张图进去，<br />它出现在你的 reMarkable 上。</h1>
+    <p class="lede">
+      一枚停在桌角的迷你 Paper Pro。松手的那一刻，窗口里的小屏幕和你手边的真机
+      同时开始落墨——同一幅画，同一个节奏。
+    </p>
+
+    <div class="stage">
+      <img class="device" src="img/bin.png" alt="悬浮在桌面上的迷你 reMarkable Paper Pro" width="112" />
+    </div>
+
+    <div class="actions">
+      <a class="download" href="https://github.com/JIACHENG135/rm-bin/releases/latest">下载 for macOS</a>
+      <span class="meta">
+        v0.3.0 · Apple Silicon · 已签名并公证 ·
+        <a href="https://github.com/JIACHENG135/rm-bin">源码</a>
+      </span>
+    </div>
+  </header>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>怎么用</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="n">01</span>
+        <h3>拖</h3>
+        <p>把图片拖到那台小设备上。纸面会抬起来，跟着你的光标倾斜。</p>
+      </div>
+      <div class="step">
+        <span class="n">02</span>
+        <h3>描</h3>
+        <p>图像被转成笔画。你选的方式决定它是被一笔笔写下去，还是整页递过去。</p>
+      </div>
+      <div class="step">
+        <span class="n">03</span>
+        <h3>落墨</h3>
+        <p>扫描线自上而下推进——它跟的是设备的真实进度，不是计时器。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>五种落墨方式</h2>
+    <p>
+      同一张图，可以用五种方式抵达设备。它们是真正不同的取舍，所以做成了设置项，
+      而不是藏在代码里的常量。
+    </p>
+
+    <dl class="modes">
+      <div class="mode">
+        <dt>笔重放<span class="tag">默认</span></dt>
+        <dd>假装成设备的笔，一笔一笔写进去。窗口里的小屏幕跟着真机同步画出同一幅——这是唯一「正在发生」的那种。内容多时要几分钟。</dd>
+      </div>
+      <div class="mode">
+        <dt>写入笔记本</dt>
+        <dd>直接生成一本新笔记送过去，几秒完成，落在干净的新页上。代价是设备要重启一次界面才能看到它。</dd>
+      </div>
+      <div class="mode">
+        <dt>直接显示</dt>
+        <dd>原图灰阶，直接推到屏幕上。最快，但不留在笔记里。</dd>
+      </div>
+      <div class="mode">
+        <dt>Gemini 线稿 + 笔重放</dt>
+        <dd>先把照片转成线稿再重放。照片直接描摹通常是一团糊，这条路让它可用。</dd>
+      </div>
+      <div class="mode">
+        <dt>存成 PDF</dt>
+        <dd>原图保真，进设备的文档库，可以在上面批注。</dd>
+      </div>
+    </dl>
+
+    <figure>
+      <img src="img/modes.png" alt="设置面板中的绘制方式选择" />
+      <figcaption>设置面板 · 每一项都写清了它的代价</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>安静的设置</h2>
+    <p>
+      <strong>⌘,</strong> 或右键那台小设备。独立的原生窗口，改完失焦即生效，没有「保存 / 取消」。
+      「检查连接」会对设备的 SSH 端口做一次真实握手，告诉你往返延迟，或者到底哪一步不通。
+    </p>
+    <p>
+      背景是 macOS 26 的 Liquid Glass。旧系统上自动退回经典材质，不会变成一块灰板。
+    </p>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>装它</h2>
+    <p>
+      下载 <code>.dmg</code>，拖进「应用程序」。App 已用 Developer ID 签名并通过 Apple 公证，
+      首次打开不会被拦。
+    </p>
+    <p>
+      设备地址在 <strong>设置 › 通用 › 关于本机 › 版权与许可</strong> 里；USB 直连时固定是
+      <code>10.11.99.1</code>。
+    </p>
+    <ul>
+      <li>macOS 11 或更新（Liquid Glass 效果需要 macOS 26）</li>
+      <li>Apple Silicon</li>
+      <li>reMarkable 2 / Paper Pro，与电脑在同一网络，或用 USB 直连</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>自己构建</h2>
+    <pre>git clone https://github.com/JIACHENG135/rm-bin
+cd rm-bin
+npm install
+npm run tauri dev</pre>
+    <p>需要 Rust 和 Node。不要用 <code>sudo</code>——那会把构建产物写成 root 所有，并且让 codesign 读到错误的钥匙串。</p>
+  </section>
+
+  <footer>
+    <span class="brand">RM Bin</span>
+    <span><a href="https://github.com/JIACHENG135/rm-bin">GitHub</a></span>
+  </footer>
+
+</div>
+</body>
+</html>
