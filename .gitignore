@@ -5,3 +5,5 @@ src-tauri/target
 src-tauri/gen
 .DS_Store
 node_modules_rootjunk
+rmfb/vendor
+rmfb/dist

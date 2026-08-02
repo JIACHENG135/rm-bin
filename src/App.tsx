@@ -145,7 +145,13 @@ export default function App() {
   /* 0..1 of the whole drawing — only the photo underneath uses this */
   const frac = useMotionValue(0);
   const fracSmooth = useSpring(frac, { stiffness: 90, damping: 22, mass: 0.5 });
-  const photoOpacity = useTransform(fracSmooth, [0, 1], [1, 0.14]);
+  /* With strokes coming, the photo is scaffolding: it fades out as the ink
+     replaces it. In screen mode there is no ink — the photo itself is what
+     lands on the panel — so it stays, and only loses its colour, which is
+     exactly what happens to it on the way there. */
+  const photoOpacity = useTransform(fracSmooth, (p) =>
+    strokes.current.length ? 1 - p * 0.86 : 1
+  );
   const photoFilter = useTransform(
     fracSmooth,
     (p) => `grayscale(${p}) contrast(${1 + p * 0.1})`
@@ -166,7 +172,11 @@ export default function App() {
         await listen<number>("draw-progress", (e) => {
           const n = Math.max(0, e.payload);
           drawn.set(n);
-          frac.set(strokes.current.length ? Math.min(1, n / strokes.current.length) : 0);
+          // With no strokes the backend is reporting 0..1 directly — screen
+          // mode has nothing to count but the picture arriving.
+          frac.set(
+            strokes.current.length ? Math.min(1, n / strokes.current.length) : Math.min(1, n)
+          );
         })
       );
       if (cancelled) off.forEach((f) => f());

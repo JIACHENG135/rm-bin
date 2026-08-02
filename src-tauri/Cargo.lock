@@ -2467,6 +2467,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remarkable_lines"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24848148c8d1d5ebdfb42f74155c2159271b6ee526b796f3d6016e83bc65efb0"
+
+[[package]]
 name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2507,6 +2513,7 @@ dependencies = [
  "image",
  "objc2",
  "objc2-foundation",
+ "remarkable_lines",
  "serde",
  "serde_json",
  "tauri",

@@ -3,9 +3,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-const DEFAULTS = { host: "10.11.99.1", port: 22 };
+/** Kept in step with `settings::Mode` on the Rust side. */
+type Mode = "pen" | "file" | "screen";
 
-type Config = { host: string; port: number };
+const DEFAULTS = { host: "10.11.99.1", port: 22, mode: "pen" as Mode };
+
+type Config = { host: string; port: number; mode: Mode };
+
+/** The two ways a drawing can get onto the tablet, and what each costs. */
+const MODES: { id: Mode; title: string; hint: string; note: string }[] = [
+  {
+    id: "pen",
+    title: "笔重放",
+    hint: "边画边看",
+    note: "假装成设备的笔，一笔一笔写进去——窗口里的小屏幕跟着真机同步画出同一幅。画在当前打开的那一页上，内容多时要几分钟。",
+  },
+  {
+    id: "file",
+    title: "写入笔记本",
+    hint: "秒级完成",
+    note: "直接生成一本新笔记送过去，几秒完成，落在干净的新页上。设备会重启一次界面才能看到它，窗口里的绘制是事后回放。",
+  },
+  {
+    id: "screen",
+    title: "直接显示",
+    hint: "原图灰阶",
+    note: "不描线，把原图按 1620×2160 直接画到屏幕上——照片就是照片，有完整的灰阶层次。代价是它不是文档：显示期间设备界面被暂停，内容不会保存，十分钟后自动恢复（也可在右键菜单里立刻恢复）。",
+  },
+];
 type Probe = { ok: boolean; latency_ms: number; detail: string };
 type Status =
   | { kind: "idle" }
@@ -39,8 +64,10 @@ export default function Settings() {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const probeSeq = useRef(0);
 
-  /* ————— probe: TCP handshake against the device ————— */
-  const probe = useCallback(async (c: Config) => {
+  /* ————— probe: TCP handshake against the device —————
+     Takes only what it dials, so it can be called with a field being edited
+     as easily as with the saved config. */
+  const probe = useCallback(async (c: { host: string; port: number }) => {
     const seq = ++probeSeq.current;
     setStatus({ kind: "probing" });
     let r: Probe;
@@ -88,7 +115,7 @@ export default function Settings() {
     setPort(String(nextPort));
     if (nextHost === config.host && nextPort === config.port) return;
 
-    const next = { host: nextHost, port: nextPort };
+    const next = { ...config, host: nextHost, port: nextPort };
     try {
       const saved = IS_TAURI
         ? await call<Config>("save_settings", { settings: next })
@@ -99,6 +126,19 @@ export default function Settings() {
       setError(String(e));
     }
   }, [host, port, config, probe]);
+
+  /* Mode is a click, not a field: it commits the moment it changes, and it
+     carries the last *saved* host rather than whatever is being typed. */
+  const chooseMode = async (mode: Mode) => {
+    if (mode === config.mode) return;
+    const next = { ...config, mode };
+    setConfig(next);
+    try {
+      if (IS_TAURI) setConfig(await call<Config>("save_settings", { settings: next }));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const revert = () => {
     setHost(config.host);
@@ -241,6 +281,30 @@ export default function Settings() {
             : status.kind === "fail" && status.detail
             ? status.detail
             : "通过 USB 连接时地址固定为 10.11.99.1。使用 Wi-Fi 时，请在设备上打开「设置 › 通用 › 关于本机 › 版权与许可」查看 IP 地址。"}
+        </p>
+
+        <h2 className="group-title">绘制方式</h2>
+
+        <div className="group">
+          {MODES.map((m, i) => (
+            <div key={m.id}>
+              {i > 0 && <div className="separator" />}
+              <label className="choice">
+                <input
+                  type="radio"
+                  name="mode"
+                  checked={config.mode === m.id}
+                  onChange={() => chooseMode(m.id)}
+                />
+                <span className="choice-title">{m.title}</span>
+                <span className="choice-hint">{m.hint}</span>
+              </label>
+            </div>
+          ))}
+        </div>
+
+        <p className="footnote">
+          {MODES.find((m) => m.id === config.mode)?.note}
         </p>
       </div>
 

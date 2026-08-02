@@ -162,7 +162,9 @@ pub fn stroke_events(c: &Calib, strokes: &[Vec<(f64, f64)>]) -> Vec<u8> {
 
 // ————— transport —————
 
-fn ssh_base(host: &str, port: u16) -> Command {
+/// Shared with `upload`: same host, same credentials, same "fail fast rather
+/// than sit at a password prompt" options.
+pub(super) fn ssh_base(host: &str, port: u16) -> Command {
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-p",
@@ -299,7 +301,7 @@ pub fn push(
 /// Pull the one interesting line out of the remote command's stderr. dd
 /// always reports its "N+M records in/out" tally there even on success, so
 /// the last line is usually noise — an actual complaint is what's wanted.
-fn remote_error(stderr: &[u8]) -> String {
+pub(super) fn remote_error(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     text.lines()
         .map(str::trim)

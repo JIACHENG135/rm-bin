@@ -17,3 +17,25 @@ pub mod imageproc;
 #[cfg(test)]
 #[path = "draw_test.rs"]
 mod draw_test;
+
+/// Writing finished `.rm` pages instead of replaying the pen. `upload` puts
+/// them on the tablet; which of the two paths runs is `Settings::mode`.
+pub mod rmfile;
+pub mod upload;
+
+/// Painting the panel directly, with xochitl stopped — the only path that
+/// puts the actual image up rather than something a pen could have drawn.
+/// The device half lives in `../../../rmfb`.
+pub mod screen;
+
+#[cfg(test)]
+#[path = "rmfile_test.rs"]
+mod rmfile_test;
+
+#[cfg(test)]
+#[path = "upload_test.rs"]
+mod upload_test;
+
+#[cfg(test)]
+#[path = "screen_test.rs"]
+mod screen_test;

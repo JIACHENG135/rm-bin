@@ -23,6 +23,7 @@
 
 use crate::rm::device::{self, Calib};
 use crate::rm::imageproc;
+use crate::rm::rmfile;
 use image::GenericImageView;
 
 /// Longer edge of the raster we trace on. Bigger keeps more detail but costs
@@ -92,8 +93,11 @@ impl Plan {
     }
 }
 
-/// Trace `image_path` and lay it out centered on `calib`'s page.
-pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
+/// Trace an image and put its strokes in drawing order, in work-raster
+/// coordinates. Shared by both outputs — the pen replay and the `.rm` writer
+/// differ only in what they map these onto, so tracing, the retry-smaller
+/// loop and the band ordering all live here.
+fn trace_and_order(image_path: &str) -> Result<(Vec<Poly>, f64, f64), String> {
     let img = image::open(image_path).map_err(|e| format!("读不了这张图：{e}"))?;
     let (src_w, src_h) = img.dimensions();
     if src_w == 0 || src_h == 0 {
@@ -101,7 +105,7 @@ pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
     }
 
     // Work raster keeps the source aspect ratio, so its pixels stay square in
-    // screen space and the placement below is a plain uniform scale.
+    // screen space and the placement is a plain uniform scale.
     let aspect = src_w as f64 / src_h as f64;
     let (mut work_w, mut work_h) = if aspect >= 1.0 {
         (BASE_WORK, BASE_WORK / aspect)
@@ -129,9 +133,14 @@ pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
     if strokes.is_empty() {
         return Err("这张图里找不到可以描的线条".into());
     }
+    Ok((order_by_band(&strokes, work_h, BANDS), work_w, work_h))
+}
 
-    let ordered = order_by_band(&strokes, work_h, BANDS);
-    let to_pen = placement(work_w, work_h, calib);
+/// Trace `image_path` and lay it out centered on `calib`'s page, as pen
+/// digitizer events to be replayed.
+pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
+    let (ordered, work_w, work_h) = trace_and_order(image_path)?;
+    let to_screen = placement(work_w, work_h, calib);
 
     // Stroke events only — `push` frames the pen session around them, so
     // stroke 0 begins the moment the first ink lands rather than the moment
@@ -140,13 +149,60 @@ pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
     let mut stroke_ends = Vec::with_capacity(ordered.len());
     let mut preview = Vec::with_capacity(ordered.len());
     for stroke in &ordered {
-        let placed: Poly = stroke.iter().map(|&p| to_pen(p)).collect();
+        let placed: Poly = stroke
+            .iter()
+            .map(|&p| {
+                let (u, v) = to_screen(p);
+                calib.pen_from_screen(u, v)
+            })
+            .collect();
         bytes.extend_from_slice(&device::stroke_events(calib, std::slice::from_ref(&placed)));
         stroke_ends.push(bytes.len());
         preview.push(to_preview(stroke, work_w, work_h));
     }
 
     Ok(Plan { bytes, stroke_ends, preview })
+}
+
+/// A traced image as a `.rm` page, plus the same strokes for the window.
+pub struct Page {
+    /// Strokes in page coordinates, in drawing order — the order matters as
+    /// much here as in `Plan`, because a `.rm` page chains its lines and the
+    /// tablet renders them along that chain.
+    pub strokes: Vec<Vec<rmfile::Point>>,
+    /// The same strokes for the window, exactly as `Plan::preview`, so the two
+    /// paths hand the frontend the identical thing and it needs to know
+    /// nothing about which one ran.
+    pub preview: Vec<PreviewStroke>,
+}
+
+/// Trace `image_path` and lay it out as a `.rm` page: same tracing, ordering
+/// and placement as `plan`, but in page coordinates (x from the centre, y
+/// from the top, both in screen pixels) instead of pen digitizer units.
+pub fn page(image_path: &str, calib: &Calib) -> Result<Page, String> {
+    let (ordered, work_w, work_h) = trace_and_order(image_path)?;
+    let to_screen = placement(work_w, work_h, calib);
+    Ok(Page {
+        strokes: ordered
+            .iter()
+            .map(|stroke| {
+                stroke
+                    .iter()
+                    .map(|&p| {
+                        let (u, v) = to_screen(p);
+                        rmfile::Point {
+                            x: ((u - 0.5) * calib.screen_w) as f32,
+                            y: (v * calib.screen_h) as f32,
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        preview: ordered
+            .iter()
+            .map(|s| to_preview(s, work_w, work_h))
+            .collect(),
+    })
 }
 
 /// Quantised, decimated copy of a stroke in the image's own frame, for the
@@ -172,7 +228,12 @@ fn to_preview(stroke: &Poly, work_w: f64, work_h: f64) -> PreviewStroke {
 }
 
 /// Uniform fit of the work raster into the page, centered, with a margin —
-/// returned as a closure from raster pixels to raw pen units.
+/// returned as a closure from raster pixels to screen-normalised (u, v), both
+/// 0..1 with the origin at the top left.
+///
+/// Screen space rather than pen space because there are two consumers now:
+/// the pen replay wants raw digitizer units, and the `.rm` writer wants page
+/// pixels. Both are one step from here and neither owns the layout.
 fn placement(work_w: f64, work_h: f64, calib: &Calib) -> impl Fn((f64, f64)) -> (f64, f64) + '_ {
     let avail_w = calib.screen_w * (1.0 - 2.0 * MARGIN);
     let avail_h = calib.screen_h * (1.0 - 2.0 * MARGIN);
@@ -182,7 +243,7 @@ fn placement(work_w: f64, work_h: f64, calib: &Calib) -> impl Fn((f64, f64)) -> 
     move |(x, y)| {
         let u = (x0 + x * s) / calib.screen_w;
         let v = (y0 + y * s) / calib.screen_h;
-        calib.pen_from_screen(u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+        (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
     }
 }
 

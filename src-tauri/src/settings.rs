@@ -15,6 +15,32 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 const DEFAULT_HOST: &str = "10.11.99.1";
 const DEFAULT_PORT: u16 = 22;
 
+/// Which of the two ways of getting a drawing onto the tablet to use. They
+/// are genuinely different trades, not an implementation detail, which is why
+/// this is a setting rather than a constant:
+///
+/// - `Pen` replays the strokes through the digitizer. It is slow — minutes for
+///   a busy image, because events have to be fed at roughly pen speed — and it
+///   draws on top of whatever page is open. In exchange it is the only one of
+///   the two that is *happening* while you watch: the window inks each stroke
+///   as the tablet inks it.
+/// - `File` writes a finished `.rm` page and hands it over. Seconds, a fresh
+///   page, exact pen and colour, and no toolbar to blunder into — but the page
+///   arrives all at once, so the window's drawing is a replay rather than a
+///   mirror, and xochitl has to be restarted to notice it.
+/// - `Screen` paints the panel itself. The only one that shows the *image* —
+///   a photograph arrives as a photograph in eight-bit grey, instead of as
+///   the thicket of lines tracing one produces. The cost is that it is not a
+///   document at all: xochitl is stopped while it is up, nothing is saved,
+///   and the tablet's interface comes back over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Pen,
+    File,
+    Screen,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -22,6 +48,8 @@ pub struct Settings {
     pub host: String,
     /// SSH port — 22 unless the user tunnels.
     pub port: u16,
+    /// How the drawing gets there.
+    pub mode: Mode,
 }
 
 impl Default for Settings {
@@ -29,6 +57,10 @@ impl Default for Settings {
         Self {
             host: DEFAULT_HOST.into(),
             port: DEFAULT_PORT,
+            // Pen replay: slower and messier, but it's the one where the
+            // window and the tablet are doing the same thing at the same
+            // moment, and that is the thing this app is *for*.
+            mode: Mode::Pen,
         }
     }
 }
@@ -61,6 +93,7 @@ fn write_settings(path: &std::path::Path, settings: &Settings) -> Result<Setting
         } else {
             settings.port
         },
+        mode: settings.mode,
     };
 
     let body = serde_json::to_vec_pretty(&clean).map_err(|e| e.to_string())?;
@@ -233,9 +266,17 @@ pub fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), St
         .accelerator("CmdOrCtrl+,")
         .build(&app)
         .map_err(|e| e.to_string())?;
+    // Only meaningful after a screen-mode drop, but always offered: the state
+    // it undoes lives on the tablet, so the app cannot know whether xochitl
+    // is stopped, and asking to start something already running is harmless.
+    let restore = MenuItemBuilder::new("恢复设备界面")
+        .id("restore-device")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
     let quit = PredefinedMenuItem::quit(&app, Some("退出 RM Bin")).map_err(|e| e.to_string())?;
     let menu = MenuBuilder::new(&app)
         .item(&settings)
+        .item(&restore)
         .separator()
         .item(&quit)
         .build()
@@ -257,7 +298,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("RM Bin 设置")
-            .inner_size(460.0, 282.0)
+            .inner_size(460.0, 428.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
@@ -300,6 +341,7 @@ mod tests {
             &Settings {
                 host: "  192.168.1.42 ".into(),
                 port: 0,
+                mode: Mode::File,
             },
         )
         .unwrap();
@@ -308,6 +350,7 @@ mod tests {
 
         let loaded = read_settings(&p);
         assert_eq!(loaded.host, "192.168.1.42");
+        assert_eq!(loaded.mode, Mode::File);
         assert!(!p.with_extension("json.tmp").exists()); // temp file was renamed away
     }
 
@@ -317,10 +360,23 @@ mod tests {
             &tmp("empty"),
             &Settings {
                 host: "   ".into(),
-                port: 22
+                port: 22,
+                mode: Mode::Pen,
             }
         )
         .is_err());
+    }
+
+    /// Settings files written before `mode` existed must still load, and land
+    /// on the default rather than refusing to parse.
+    #[test]
+    fn settings_without_mode_still_load() {
+        let p = tmp("legacy");
+        std::fs::write(&p, r#"{"host":"1.2.3.4","port":2222}"#).unwrap();
+        let s = read_settings(&p);
+        assert_eq!(s.host, "1.2.3.4");
+        assert_eq!(s.port, 2222);
+        assert_eq!(s.mode, Mode::Pen);
     }
 
     #[test]
