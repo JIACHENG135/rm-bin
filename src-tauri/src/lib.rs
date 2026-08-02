@@ -123,10 +123,17 @@ fn send_as_pdf(
 
     let name = rm::upload::name_from_path(path);
     let size = pdf.len();
-    rm::pdf::upload(&cfg.host, &name, &pdf)?;
+    let how = rm::pdf::deliver(&cfg.host, cfg.port, &name, &pdf)?;
     let _ = app.emit(PROGRESS_EVENT, 1.0);
 
-    Ok(format!("uploaded \"{name}.pdf\" ({size} bytes) to {}", cfg.host))
+    let route = match how {
+        rm::pdf::Delivered::WebInterface => "the web interface",
+        rm::pdf::Delivered::Ssh => "ssh (xochitl restarted)",
+    };
+    Ok(format!(
+        "uploaded \"{name}.pdf\" ({size} bytes) to {} via {route}",
+        cfg.host
+    ))
 }
 
 /// Redraw the image as line art, then ink that.

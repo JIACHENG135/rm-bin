@@ -51,13 +51,29 @@ pub fn build(name: &str, strokes: &[Vec<rmfile::Point>], now_ms: u128) -> Notebo
     }
 }
 
-/// The shell run on the tablet: write the three files, flush, restart.
+/// One file to place in the document store: a name relative to it, and the
+/// bytes.
+pub struct Entry {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The three files a notebook is, in the order they go down the wire.
+pub(super) fn entries(nb: &Notebook) -> Vec<Entry> {
+    vec![
+        Entry { name: format!("{}.metadata", nb.doc), bytes: nb.metadata.clone().into_bytes() },
+        Entry { name: format!("{}.content", nb.doc), bytes: nb.content.clone().into_bytes() },
+        Entry { name: format!("{}/{}.rm", nb.doc, nb.page), bytes: nb.page_bytes.clone() },
+    ]
+}
+
+/// The shell run on the tablet: write every file, flush, restart.
 ///
-/// One ssh connection rather than one per file — three handshakes is most of
-/// the wall clock of this whole path, and doing it in a single `set -e` script
-/// means the restart can't happen after a half-written notebook.
+/// One ssh connection rather than one per file — the handshakes are most of
+/// the wall clock of this path, and a single `set -e` script means the
+/// restart cannot happen after a half-written document.
 ///
-/// `dd bs=N count=1 iflag=fullblock`, not `head -c N`. All three files arrive
+/// `dd bs=N count=1 iflag=fullblock`, not `head -c N`. All the files arrive
 /// down one stdin, so each command has to consume *exactly* its own bytes and
 /// leave the rest for the next one. busybox `head -c` reads in blocks and can
 /// swallow past its limit; `dd` with a `bs` equal to the whole file and
@@ -67,49 +83,63 @@ pub fn build(name: &str, strokes: &[Vec<rmfile::Point>], now_ms: u128) -> Notebo
 /// dd's own "N+0 records in" tally goes to stderr on success too, which is why
 /// stderr isn't silenced here: `device::remote_error` already knows to skip
 /// those lines, and silencing them would also silence the real complaints.
-pub(super) fn script(nb: &Notebook) -> String {
-    format!(
+pub(super) fn script_for(files: &[Entry], dirs: &[String]) -> String {
+    let mut s = format!(
         "set -e\n\
          d={STORE}\n\
-         [ -d \"$d\" ] || {{ echo 'xochitl data directory missing'; exit 1; }}\n\
-         mkdir -p \"$d/{doc}\"\n\
-         dd bs={n_meta} count=1 iflag=fullblock of=\"$d/{doc}.metadata\"\n\
-         dd bs={n_content} count=1 iflag=fullblock of=\"$d/{doc}.content\"\n\
-         dd bs={n_page} count=1 iflag=fullblock of=\"$d/{doc}/{page}.rm\"\n\
-         sync\n\
-         systemctl restart xochitl\n",
-        doc = nb.doc,
-        page = nb.page,
-        n_meta = nb.metadata.len(),
-        n_content = nb.content.len(),
-        n_page = nb.page_bytes.len(),
-    )
+         [ -d \"$d\" ] || {{ echo 'xochitl data directory missing'; exit 1; }}\n"
+    );
+    for dir in dirs {
+        s.push_str(&format!("mkdir -p \"$d/{dir}\"\n"));
+    }
+    for f in files {
+        s.push_str(&format!(
+            "dd bs={} count=1 iflag=fullblock of=\"$d/{}\"\n",
+            f.bytes.len(),
+            f.name
+        ));
+    }
+    s.push_str("sync\nsystemctl restart xochitl\n");
+    s
 }
 
 /// Write `nb` into the tablet's document store and restart xochitl so it
 /// appears. Returns once the restart has been asked for — xochitl takes a few
 /// seconds more to come back up on its own.
 pub fn install(host: &str, port: u16, nb: &Notebook) -> Result<(), String> {
+    install_files(host, port, &entries(nb), std::slice::from_ref(&nb.doc))
+}
+
+/// Place a set of files in xochitl's document store and restart it.
+///
+/// Shared by the notebook writer and the PDF importer's ssh path, because
+/// what they need is identical and the awkward parts — one connection, exact
+/// framing down a single shared stdin, and a restart that must not happen
+/// until every file has landed — are worth having in one place rather than
+/// two.
+pub fn install_files(host: &str, port: u16, files: &[Entry], dirs: &[String]) -> Result<(), String> {
+    let script = script_for(files, dirs);
+
     let mut child = ssh_base(host, port)
-        .arg(script(nb))
+        .arg(script)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("无法启动 ssh: {e}"))?;
 
     let mut stdin = child.stdin.take().expect("piped");
-    // Order matters: it's the order `script` consumes them in.
-    let ok = stdin
-        .write_all(nb.metadata.as_bytes())
-        .and_then(|_| stdin.write_all(nb.content.as_bytes()))
-        .and_then(|_| stdin.write_all(&nb.page_bytes))
-        .and_then(|_| stdin.flush())
-        .is_ok();
+    // Order matters: it is the order the script consumes them in.
+    let mut ok = true;
+    for f in files {
+        if stdin.write_all(&f.bytes).is_err() {
+            ok = false;
+            break;
+        }
+    }
+    ok &= stdin.flush().is_ok();
     drop(stdin);
 
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("ssh 失败：{e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("ssh 失败：{e}"))?;
     if out.status.success() && ok {
         return Ok(());
     }
@@ -127,7 +157,7 @@ pub fn install(host: &str, port: u16, nb: &Notebook) -> Result<(), String> {
 /// them is that two notebooks don't collide and overwrite each other. A
 /// splitmix64 seeded from the nanosecond clock and the address of a local is
 /// far past sufficient for that, and it keeps the dependency list honest.
-fn uuid() -> String {
+pub(crate) fn uuid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let nanos = SystemTime::now()

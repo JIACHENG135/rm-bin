@@ -156,6 +156,94 @@ fn assemble(jpeg: &[u8], w: u32, h: u32, color_space: &str, pw: f64, ph: f64) ->
     out
 }
 
+/// How the document got there — worth reporting, because the two differ in
+/// whether the tablet's interface restarted underneath the user.
+pub enum Delivered {
+    WebInterface,
+    Ssh,
+}
+
+/// Get the PDF onto the tablet, by whichever route is open.
+///
+/// The web interface is the better one — it is the tablet's own importer, so
+/// nothing restarts and the document simply appears — but it is off by
+/// default and, when on, listens only on the USB address. On a tablet that
+/// lives on wifi with no cable there is no port 80 at all, which is exactly
+/// what the first version of this ran into.
+///
+/// So: try it, and fall back to placing the file in the document store over
+/// ssh, which works anywhere ssh does and costs an xochitl restart. The web
+/// interface is tried first rather than configured, because "is it reachable"
+/// is a question with a fast, definitive answer and no setting can be as
+/// accurate as asking.
+pub fn deliver(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<Delivered, String> {
+    match upload(host, name, pdf) {
+        Ok(()) => Ok(Delivered::WebInterface),
+        Err(web_err) => match install_over_ssh(host, port, name, pdf) {
+            Ok(()) => Ok(Delivered::Ssh),
+            // Report both: one of them is the reason, and which one depends
+            // on a setup detail only the person in front of the tablet knows.
+            Err(ssh_err) => Err(format!("{ssh_err}\n（网页接口也不通：{web_err}）")),
+        },
+    }
+}
+
+/// Place the PDF in xochitl's document store and restart it.
+///
+/// The wrapper xochitl needs around an imported PDF is the same shape as a
+/// notebook's, minus the page: a `.metadata` naming it and a `.content`
+/// saying it is a PDF. Everything else — page ids, thumbnails — xochitl
+/// generates for itself on the next start.
+fn install_over_ssh(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<(), String> {
+    use crate::rm::upload::{install_files, Entry};
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let doc = crate::rm::upload::uuid();
+
+    install_files(
+        host,
+        port,
+        &[
+            Entry {
+                name: format!("{doc}.metadata"),
+                bytes: crate::rm::rmfile::metadata(name, now_ms).into_bytes(),
+            },
+            Entry {
+                name: format!("{doc}.content"),
+                bytes: content(pdf.len()).into_bytes(),
+            },
+            Entry { name: format!("{doc}.pdf"), bytes: pdf.to_vec() },
+        ],
+        &[],
+    )
+}
+
+/// The `.content` for an imported PDF.
+pub(crate) fn content(size: usize) -> String {
+    format!(
+        r#"{{
+    "coverPageNumber": -1,
+    "documentMetadata": {{}},
+    "extraMetadata": {{}},
+    "fileType": "pdf",
+    "fontName": "",
+    "formatVersion": 2,
+    "lineHeight": -1,
+    "margins": 125,
+    "orientation": "portrait",
+    "pageCount": 1,
+    "sizeInBytes": "{size}",
+    "tags": [],
+    "textAlignment": "justify",
+    "textScale": 1
+}}
+"#
+    )
+}
+
 /// Post the PDF to the tablet's USB web interface.
 ///
 /// `curl` again, for multipart: hand-rolling a form body to save a

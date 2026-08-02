@@ -156,6 +156,18 @@ fn an_unreadable_file_is_an_error() {
     assert!(pdf::build("/nonexistent/nope.png").is_err());
 }
 
+/// The `.content` beside an imported PDF is what tells xochitl it is a PDF at
+/// all; get it wrong and the document appears in the library and opens empty.
+#[test]
+fn the_pdf_wrapper_declares_itself_a_pdf() {
+    let c = pdf::content(123_456);
+    let v: serde_json::Value = serde_json::from_str(&c).expect("must be valid JSON");
+    assert_eq!(v["fileType"], "pdf");
+    assert_eq!(v["pageCount"], 1);
+    assert_eq!(v["sizeInBytes"], "123456");
+    assert_eq!(v["formatVersion"], 2);
+}
+
 /// The endpoint answers 200 whatever happens, so the body is the only signal
 /// — and "no reply at all" almost always means something else is on port 80.
 #[test]

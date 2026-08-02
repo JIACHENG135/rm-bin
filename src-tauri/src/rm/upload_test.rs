@@ -40,7 +40,7 @@ fn dd_sizes(script: &str) -> Vec<usize> {
 fn the_script_asks_for_exactly_the_bytes_that_are_sent() {
     let nb = upload::build("drawing", &strokes(), 1_700_000_000_000);
     assert_eq!(
-        dd_sizes(&upload::script(&nb)),
+        dd_sizes(&upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc))),
         vec![nb.metadata.len(), nb.content.len(), nb.page_bytes.len()],
         "dd sizes must match the payloads, in the order install() writes them"
     );
@@ -55,7 +55,7 @@ fn the_script_asks_for_exactly_the_bytes_that_are_sent() {
 #[test]
 fn the_script_aborts_on_error_and_restarts_last() {
     let nb = upload::build("drawing", &strokes(), 1);
-    let script = upload::script(&nb);
+    let script = upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc));
     assert!(script.starts_with("set -e"), "{script}");
 
     let lines: Vec<_> = script.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -74,7 +74,7 @@ fn the_script_aborts_on_error_and_restarts_last() {
 fn the_page_is_named_the_same_in_the_content_file() {
     let nb = upload::build("drawing", &strokes(), 1);
     assert!(nb.content.contains(&nb.page));
-    assert!(upload::script(&nb).contains(&format!("{}/{}.rm", nb.doc, nb.page)));
+    assert!(upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc)).contains(&format!("{}/{}.rm", nb.doc, nb.page)));
     assert_ne!(nb.doc, nb.page);
 }
 
