@@ -38,6 +38,7 @@ async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<Strin
             settings::Mode::Pen => draw_with_pen(&app, &cfg, &path),
             settings::Mode::File => draw_as_file(&app, &cfg, &path),
             settings::Mode::Screen => show_on_screen(&app, &cfg, &path),
+            settings::Mode::Sketch => draw_sketch(&app, &cfg, &path),
         };
         // The window's whole vocabulary for failure is a head-shake, which
         // says that something went wrong and nothing about what. Everything
@@ -97,6 +98,27 @@ fn show_on_screen(
     }
 
     Ok(format!("showed {w}x{h} on the panel at {}", cfg.host))
+}
+
+/// Redraw the image as line art, then ink that.
+///
+/// The window shows the original photo throughout, including the half-minute
+/// the model takes, and then the strokes that appear over it are the
+/// redrawing's. That mismatch is real and is the mode's nature: what reaches
+/// the page is a drawing *of* the photo, and the window is honest about which
+/// one it is holding by keeping the photo until ink starts landing on it.
+fn draw_sketch(
+    app: &tauri::AppHandle,
+    cfg: &settings::Settings,
+    path: &str,
+) -> Result<String, String> {
+    let sketch = rm::gemini::to_line_art(path)?;
+    let sketch_path = sketch.to_string_lossy().to_string();
+    let result = draw_with_pen(app, cfg, &sketch_path);
+    // The redraw is a cache of nothing — the next drop wants a fresh one, and
+    // leaving PNGs in the temp directory is somebody else's problem to clean.
+    let _ = std::fs::remove_file(&sketch);
+    result.map(|msg| format!("{msg} (from a Gemini redraw)"))
 }
 
 /// Hand the tablet's own interface back, rather than waiting for the device's

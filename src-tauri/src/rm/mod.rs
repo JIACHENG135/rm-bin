@@ -28,6 +28,14 @@ pub mod upload;
 /// The device half lives in `../../../rmfb`.
 pub mod screen;
 
+/// Redrawing a photograph as line art before tracing it, because the tracer
+/// needs lines and a photograph has none.
+pub mod gemini;
+
+#[cfg(test)]
+#[path = "gemini_test.rs"]
+mod gemini_test;
+
 #[cfg(test)]
 #[path = "rmfile_test.rs"]
 mod rmfile_test;

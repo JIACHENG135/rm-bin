@@ -35,10 +35,17 @@ const DEFAULT_PORT: u16 = 22;
 ///   and the tablet's interface comes back over it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+/// - `Sketch` is `Pen` with a redraw in front of it: a photograph goes to
+///   Gemini to be turned into line art, and *that* is what gets traced and
+///   inked. It is the only way a photograph comes out looking like anything,
+///   and it is a separate mode rather than a switch on `Pen` because what
+///   lands is a redrawing, not the picture — and running it on artwork that
+///   was already clean line art makes it worse.
 pub enum Mode {
     Pen,
     File,
     Screen,
+    Sketch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,7 +305,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("RM Bin 设置")
-            .inner_size(460.0, 428.0)
+            .inner_size(460.0, 500.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)

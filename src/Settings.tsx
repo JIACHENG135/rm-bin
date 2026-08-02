@@ -4,7 +4,7 @@ const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** Kept in step with `settings::Mode` on the Rust side. */
-type Mode = "pen" | "file" | "screen";
+type Mode = "pen" | "file" | "screen" | "sketch";
 
 const DEFAULTS = { host: "10.11.99.1", port: 22, mode: "pen" as Mode };
 
@@ -29,6 +29,12 @@ const MODES: { id: Mode; title: string; hint: string; note: string }[] = [
     title: "直接显示",
     hint: "原图灰阶",
     note: "不描线，把原图按 1620×2160 直接画到屏幕上——照片就是照片，有完整的灰阶层次。代价是它不是文档：显示期间设备界面被暂停，内容不会保存，十分钟后自动恢复（也可在右键菜单里立刻恢复）。",
+  },
+  {
+    id: "sketch",
+    title: "Gemini 线稿 + 笔重放",
+    hint: "照片可用",
+    note: "先让 Gemini 把图重画成干净线稿，再用笔一笔笔写上去。照片终于能出好结果——但落到纸上的是一幅「照着画的画」，不是原图；本来就干净的线稿别用这个。需要环境变量 GEMINI_API_KEY（从访达启动的话，要先 launchctl setenv）。",
   },
 ];
 type Probe = { ok: boolean; latency_ms: number; detail: string };
