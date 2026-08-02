@@ -1,5 +1,7 @@
 node_modules
 dist
+.vite-cache
 src-tauri/target
 src-tauri/gen
 .DS_Store
+node_modules_rootjunk
