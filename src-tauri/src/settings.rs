@@ -41,11 +41,16 @@ const DEFAULT_PORT: u16 = 22;
 ///   and it is a separate mode rather than a switch on `Pen` because what
 ///   lands is a redrawing, not the picture — and running it on artwork that
 ///   was already clean line art makes it worse.
+/// - `Pdf` makes a one-page document and posts it to the tablet's own
+///   importer. The only one that is the picture *and* a document *and*
+///   writable — and the only one that needs no ssh, no key and no stopped
+///   xochitl, just the USB web interface switched on.
 pub enum Mode {
     Pen,
     File,
     Screen,
     Sketch,
+    Pdf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,7 +310,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("RM Bin 设置")
-            .inner_size(460.0, 500.0)
+            .inner_size(460.0, 560.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)

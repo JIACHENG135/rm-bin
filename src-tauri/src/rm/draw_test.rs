@@ -46,7 +46,18 @@ fn test_image() -> String {
             }
         }
     }
-    let path = std::env::temp_dir().join("rm-bin-draw-test.png");
+    // A distinct file per call. This used to be one fixed name, which is a
+    // race: cargo runs these tests in parallel threads of one process, so two
+    // of them would write the same path while a third read it half-written.
+    // It only started failing when slower tests elsewhere shifted the timing
+    // — the usual way a latent race announces itself.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rm-bin-draw-test-{}-{}.png",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     img.save(&path).unwrap();
     path.to_string_lossy().into_owned()
 }

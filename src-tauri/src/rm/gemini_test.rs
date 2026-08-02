@@ -7,7 +7,45 @@
 //! not seen, and that an API error comes back as the API's own words instead
 //! of "no image found".
 
-use super::gemini::{base64_decode, base64_encode, extract_image};
+use super::gemini::{base64_decode, base64_encode, extension_of, extract_image};
+
+/// The redraw is written to a temp file that the tracer then opens with
+/// `image::open`, which picks its decoder from the *file name*. So the name
+/// has to follow the bytes. It didn't at first — everything was written
+/// `.png`, the model replied with a JPEG, and a perfectly good picture came
+/// back as "Invalid PNG signature".
+#[test]
+fn the_extension_follows_the_bytes_not_the_response() {
+    assert_eq!(extension_of(b"\x89PNG\r\n\x1a\n....").unwrap(), "png");
+    assert_eq!(extension_of(b"\xff\xd8\xff\xe0JFIF").unwrap(), "jpg");
+    assert_eq!(extension_of(b"RIFF\x00\x00\x00\x00WEBPVP8 ").unwrap(), "webp");
+    assert_eq!(extension_of(b"GIF89a.......").unwrap(), "gif");
+    assert_eq!(extension_of(b"BM........").unwrap(), "bmp");
+
+    // RIFF alone is not WebP, and must not be claimed as one.
+    assert!(extension_of(b"RIFF\x00\x00\x00\x00WAVEfmt ").is_err());
+
+    // An unknown blob should say what arrived rather than guess: by this
+    // point the request succeeded, so "what is this" is the whole question.
+    let err = extension_of(b"\x00\x01\x02\x03junk").unwrap_err();
+    assert!(err.contains("00 01 02 03"), "{err}");
+    assert!(extension_of(b"").is_err());
+}
+
+/// The size floor the prompt tells the model about is a consequence of the
+/// tracer's work raster, so it is interpolated from `draw::BASE_WORK` rather
+/// than typed twice. If that ever drifts, the prompt starts quietly lying
+/// about the machine it is describing.
+#[test]
+fn the_prompt_describes_the_actual_pipeline() {
+    let p = super::gemini::prompt(crate::rm::draw::BASE_WORK as u32);
+    assert!(p.contains("700"), "the work raster must be stated: {p}");
+    for must in ["Otsu", "Zhang-Suen", "branch", "outlines only", "print letters"] {
+        assert!(p.contains(must), "prompt is missing {must:?}");
+    }
+    // Different raster, different claim — proves it is interpolated.
+    assert!(super::gemini::prompt(512).contains("512"));
+}
 
 #[test]
 fn base64_round_trips_including_the_padding_cases() {

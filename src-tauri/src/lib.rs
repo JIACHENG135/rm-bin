@@ -39,6 +39,7 @@ async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<Strin
             settings::Mode::File => draw_as_file(&app, &cfg, &path),
             settings::Mode::Screen => show_on_screen(&app, &cfg, &path),
             settings::Mode::Sketch => draw_sketch(&app, &cfg, &path),
+            settings::Mode::Pdf => send_as_pdf(&app, &cfg, &path),
         };
         // The window's whole vocabulary for failure is a head-shake, which
         // says that something went wrong and nothing about what. Everything
@@ -100,6 +101,34 @@ fn show_on_screen(
     Ok(format!("showed {w}x{h} on the panel at {}", cfg.host))
 }
 
+/// Wrap the image in a one-page PDF and hand it to the tablet's importer.
+///
+/// No strokes and no panel takeover, so the window does what it does in
+/// screen mode: holds the photograph and desaturates it while the document
+/// crosses. That is the honest picture of this path — what arrives is the
+/// image, unchanged apart from being in a document.
+fn send_as_pdf(
+    app: &tauri::AppHandle,
+    cfg: &settings::Settings,
+    path: &str,
+) -> Result<String, String> {
+    let _ = app.emit(PLAN_EVENT, Vec::<rm::draw::PreviewStroke>::new());
+    let _ = app.emit(PROGRESS_EVENT, 0.0);
+
+    let pdf = rm::pdf::build(path)?;
+    // Building is the slow half — encoding a large photograph — and the post
+    // is one request with no progress to read, so this is the only honest
+    // waypoint there is.
+    let _ = app.emit(PROGRESS_EVENT, 0.6);
+
+    let name = rm::upload::name_from_path(path);
+    let size = pdf.len();
+    rm::pdf::upload(&cfg.host, &name, &pdf)?;
+    let _ = app.emit(PROGRESS_EVENT, 1.0);
+
+    Ok(format!("uploaded \"{name}.pdf\" ({size} bytes) to {}", cfg.host))
+}
+
 /// Redraw the image as line art, then ink that.
 ///
 /// The window shows the original photo throughout, including the half-minute
@@ -113,12 +142,60 @@ fn draw_sketch(
     path: &str,
 ) -> Result<String, String> {
     let sketch = rm::gemini::to_line_art(path)?;
-    let sketch_path = sketch.to_string_lossy().to_string();
-    let result = draw_with_pen(app, cfg, &sketch_path);
-    // The redraw is a cache of nothing — the next drop wants a fresh one, and
-    // leaving PNGs in the temp directory is somebody else's problem to clean.
-    let _ = std::fs::remove_file(&sketch);
-    result.map(|msg| format!("{msg} (from a Gemini redraw)"))
+
+    // Keep the redraw rather than deleting it. What comes back is the only
+    // part of this mode nobody can see — the tablet shows the traced
+    // skeleton, which is a poor witness to whether the model drew something
+    // good — and it is what you look at to decide whether the prompt needs
+    // changing. Kept per-drop rather than overwritten, so attempts can be
+    // compared.
+    let sketch = match keep_sketch(app, path, &sketch) {
+        Ok(kept) => kept,
+        Err(e) => {
+            eprintln!("[rm-bin] could not file the redraw ({e}); using it from /tmp");
+            sketch
+        }
+    };
+    eprintln!("[rm-bin] redraw saved: {}", sketch.display());
+
+    draw_with_pen(app, cfg, &sketch.to_string_lossy())
+        .map(|msg| format!("{msg}, from the redraw at {}", sketch.display()))
+}
+
+/// Move a redraw out of the temp directory into the app's own folder, named
+/// after the image it came from and when.
+fn keep_sketch(
+    app: &tauri::AppHandle,
+    original: &str,
+    sketch: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("sketches");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let stem = std::path::Path::new(original)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".into());
+    let ext = sketch.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = dir.join(format!("{stem}-{secs}.{ext}"));
+
+    // Rename first: it is atomic and free when both are on the same volume.
+    // The temp directory usually isn't, hence the copy.
+    if std::fs::rename(sketch, &dest).is_err() {
+        std::fs::copy(sketch, &dest).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(sketch);
+    }
+    Ok(dest)
 }
 
 /// Hand the tablet's own interface back, rather than waiting for the device's

@@ -36,6 +36,14 @@ pub mod gemini;
 #[path = "gemini_test.rs"]
 mod gemini_test;
 
+/// The image as a one-page PDF, posted to the tablet's own importer — the
+/// only path that is the picture, is a document, and can be written on.
+pub mod pdf;
+
+#[cfg(test)]
+#[path = "pdf_test.rs"]
+mod pdf_test;
+
 #[cfg(test)]
 #[path = "rmfile_test.rs"]
 mod rmfile_test;

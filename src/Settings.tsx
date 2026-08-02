@@ -4,7 +4,7 @@ const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** Kept in step with `settings::Mode` on the Rust side. */
-type Mode = "pen" | "file" | "screen" | "sketch";
+type Mode = "pen" | "file" | "screen" | "sketch" | "pdf";
 
 const DEFAULTS = { host: "10.11.99.1", port: 22, mode: "pen" as Mode };
 
@@ -35,6 +35,12 @@ const MODES: { id: Mode; title: string; hint: string; note: string }[] = [
     title: "Gemini 线稿 + 笔重放",
     hint: "照片可用",
     note: "先让 Gemini 把图重画成干净线稿，再用笔一笔笔写上去。照片终于能出好结果——但落到纸上的是一幅「照着画的画」，不是原图；本来就干净的线稿别用这个。需要环境变量 GEMINI_API_KEY（从访达启动的话，要先 launchctl setenv）。",
+  },
+  {
+    id: "pdf",
+    title: "存成 PDF",
+    hint: "原图 · 可批注",
+    note: "把图片包成单页 PDF 交给设备自己的导入接口。唯一同时做到「是原图、是文档、能用笔批注」的一种，而且不用 SSH、不用停设备界面。前提是设备上打开了「设置 › 通用 › 存储 › USB 网页界面」，并用 USB 线连接（地址 10.11.99.1）。",
   },
 ];
 type Probe = { ok: boolean; latency_ms: number; detail: string };

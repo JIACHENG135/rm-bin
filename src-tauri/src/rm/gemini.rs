@@ -28,18 +28,57 @@ const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interac
 /// drop where seconds are felt.
 const MODEL: &str = "gemini-3.1-flash-image";
 
-/// Every clause here is aimed at the tracer downstream, not at looking good.
-/// Even line weight, because skeletonizing collapses weight anyway and
-/// varying it only produces ragged edges; no shading or hatching, because
-/// each hatch line becomes a stroke and a thousand strokes is an hour of pen
-/// replay; white background, because Otsu's threshold splits the histogram
-/// and a grey background moves the split somewhere useless.
-const PROMPT: &str = "Redraw this image as clean black-and-white line art for a pen plotter. \
-Pure white background. Solid black outlines of even, moderate thickness. \
-No shading, no hatching, no cross-hatching, no stippling, no grey, no gradients, no filled areas. \
-Keep the composition, subject and proportions of the original. \
-Prefer few confident continuous contours over many short strokes. \
-Do not add any text, border, frame, signature or watermark.";
+/// The prompt, in rm-agent's manner: describe the machine the drawing is
+/// about to go through, then let the rules fall out of it.
+///
+/// Asking for "clean line art, no shading" — which is what this used to say —
+/// gets you a picture that looks like line art and traces terribly, because
+/// the failure modes here are not the ones a human illustrator would guess.
+/// The tracer's problem is topological: it walks a 1-pixel skeleton and has
+/// to choose a branch wherever ink meets ink. Nothing about "clean" tells a
+/// model that two contours *touching* is worse than either contour being
+/// wrong, or that a filled shape carries no more information than its
+/// outline. Explaining the pipeline does.
+///
+/// `work_px` is `draw::BASE_WORK` rather than a number typed twice: the size
+/// floor below which strokes fuse is a consequence of that raster, and a
+/// prompt claiming a different one would be quietly lying to the model.
+pub(crate) fn prompt(work_px: u32) -> String {
+    format!(
+        "Redraw this photograph as line art that a pen will physically draw, stroke by \
+stroke, on an e-ink tablet.\n\n\
+Here is exactly what happens to your image afterwards, so you can reason about what \
+will survive it: it is downscaled to about {work_px} pixels on its longest edge, \
+converted to black and white by Otsu thresholding, thinned to a 1-pixel-wide \
+centreline skeleton (Zhang-Suen), and that skeleton is walked into ordered pen strokes \
+— starting from endpoints, following connected pixels, and taking the \
+straightest-continuing branch wherever a pixel has more than one unvisited neighbour.\n\n\
+Three consequences decide whether a drawing survives this.\n\n\
+Touching ink becomes a tangle. Anywhere two pieces of ink touch or cross, they become \
+one connected blob with branch points, and the tracer has to guess which branch \
+continues which line. It guesses wrong often enough that touching ink reliably comes \
+out garbled instead of as the two clean shapes you drew. This applies to any contact at \
+all. So leave generous space between every distinct element, and let contours stop \
+short of each other rather than meet.\n\n\
+Fills and shading carry no information. Nothing grey and nothing coloured survives the \
+threshold: a filled or shaded region becomes an undifferentiated black area whose \
+skeleton is a meaningless spine down its middle. Use outlines only. Never hatch, \
+cross-hatch or stipple — every hatch line is itself a branch point where it meets the \
+outline it is filling.\n\n\
+Small detail fuses. Below roughly one part in {work_px} of the image's long edge, \
+neighbouring strokes merge into a single blob when thinned. Draw few, large, confident \
+shapes. It is far better to under-describe the subject with a dozen clean contours than \
+to render it faithfully with hundreds of small ones.\n\n\
+Given all that: redraw the subject as a small number of long, smooth, well-separated \
+outlines on a plain white background, keeping the composition, proportions and \
+recognisable shape of the original. Even, moderate line weight throughout — the \
+thinning discards weight anyway, and varying it only ragged the edges. Drop background \
+scenery that is not the subject rather than outlining it too. No page frame, border, \
+margin line, signature or watermark. If the original contains lettering that has to be \
+kept, write it as separated print letters, never joined script: connected letters are \
+the touching-ink case again, and a whole word merges into one blob."
+    )
+}
 
 /// Long enough for a slow generation, short enough that a drop that is never
 /// coming back gives up while the window is still showing the photo.
@@ -72,7 +111,7 @@ pub fn to_line_art(image_path: &str) -> Result<PathBuf, String> {
     let body = serde_json::json!({
         "model": MODEL,
         "input": [
-            { "type": "text", "text": PROMPT },
+            { "type": "text", "text": prompt(crate::rm::draw::BASE_WORK as u32) },
             { "type": "image", "mime_type": mime_of(image_path), "data": base64_encode(&bytes) }
         ]
     })
@@ -83,7 +122,6 @@ pub fn to_line_art(image_path: &str) -> Result<PathBuf, String> {
     let body_path = dir.join(format!("{stem}.json"));
     let conf_path = dir.join(format!("{stem}.conf"));
     let out_path = dir.join(format!("{stem}.out"));
-    let png_path = dir.join(format!("{stem}.png"));
 
     // The key goes in the config file, never in argv.
     let conf = format!(
@@ -132,7 +170,7 @@ pub fn to_line_art(image_path: &str) -> Result<PathBuf, String> {
     }
 
     let raw = std::fs::read(&out_path).unwrap_or_default();
-    let png = match extract_image(&raw) {
+    let image = match extract_image(&raw) {
         Ok(p) => p,
         Err(e) => {
             cleanup();
@@ -141,8 +179,42 @@ pub fn to_line_art(image_path: &str) -> Result<PathBuf, String> {
     };
     cleanup();
 
-    std::fs::write(&png_path, &png).map_err(|e| format!("无法保存线稿：{e}"))?;
-    Ok(png_path)
+    // The extension has to match the bytes: everything downstream opens this
+    // file with `image::open`, which decides the format from the name. The
+    // first version always wrote `.png` and the model answered with a JPEG,
+    // so a perfectly good picture came back as "Invalid PNG signature".
+    //
+    // Sniffed rather than taken from the response's own `mime_type`, because
+    // the bytes are the only part of that answer that cannot be wrong.
+    let ext = extension_of(&image)?;
+    let path = dir.join(format!("{stem}.{ext}"));
+    std::fs::write(&path, &image).map_err(|e| format!("无法保存线稿：{e}"))?;
+    Ok(path)
+}
+
+/// The file extension for some image bytes, by magic number.
+pub(crate) fn extension_of(bytes: &[u8]) -> Result<&'static str, String> {
+    let head = |sig: &[u8]| bytes.starts_with(sig);
+    if head(b"\x89PNG\r\n\x1a\n") {
+        Ok("png")
+    } else if head(b"\xff\xd8\xff") {
+        Ok("jpg")
+    } else if bytes.len() > 12 && head(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Ok("webp")
+    } else if head(b"GIF87a") || head(b"GIF89a") {
+        Ok("gif")
+    } else if head(b"BM") {
+        Ok("bmp")
+    } else {
+        // Say what did arrive: at this point the request succeeded and
+        // something was decoded, so the interesting question is what.
+        let head: String = bytes.iter().take(8).map(|b| format!("{b:02x} ")).collect();
+        Err(format!(
+            "Gemini 返回了无法识别的图片格式（{} 字节，开头 {}）",
+            bytes.len(),
+            head.trim_end()
+        ))
+    }
 }
 
 /// Write with an owner-only mode, since one of these holds the API key.

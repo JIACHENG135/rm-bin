@@ -29,7 +29,7 @@ use image::GenericImageView;
 /// Longer edge of the raster we trace on. Bigger keeps more detail but costs
 /// stroke points, and every point is ~4 input events crawling down an SSH
 /// pipe at digitizer pace — this is really a drawing-time dial.
-const BASE_WORK: f64 = 700.0;
+pub(crate) const BASE_WORK: f64 = 700.0;
 /// Past this the draw takes minutes, so retrace smaller instead.
 const MAX_STROKE_POINTS: usize = 14_000;
 /// Blank margin left around the image, as a fraction of the screen.
