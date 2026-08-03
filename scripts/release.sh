@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 发版：构建 → Developer ID 签名 → 公证 → 装订 → 校验
+# 发版：构建 → Developer ID 签名 → 校验
+# （公证 + 装订暂时注释掉了，见下面「构建 + 签名」一节）
 #
 #   npm run release          完整发版
 #   npm run release -- -c    只检查凭据，不构建
@@ -55,14 +56,16 @@ if $CHECK_ONLY; then
   exit 0
 fi
 
-# ————— 构建 + 签名 + 公证 + 装订 —————
-# Tauri 会在打 dmg 之前完成 .app 的公证和装订，所以 dmg 里装的是已装订的 .app
-step "构建中（含公证，Apple 排队通常 1–5 分钟）…"
+# ————— 构建 + 签名（+ 公证 + 装订，已注释掉）—————
+# Tauri 只在 APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID 都存在时才会公证；
+# 不传这三个，构建出的 .app 就只签名、不公证。公证耗时不定（几分钟到几小时），
+# 需要恢复时把下面三行取消注释即可。
+step "构建中（仅签名，未公证）…"
 APPLE_SIGNING_IDENTITY="$IDENTITY" \
-APPLE_ID="$ACCOUNT" \
-APPLE_PASSWORD="$PASSWORD" \
-APPLE_TEAM_ID="$TEAM" \
   npm run tauri build
+# APPLE_ID="$ACCOUNT" \
+# APPLE_PASSWORD="$PASSWORD" \
+# APPLE_TEAM_ID="$TEAM" \
 
 # ————— 校验 —————
 APP="src-tauri/target/release/bundle/macos/RM Bin.app"
@@ -74,22 +77,8 @@ failed=false
 codesign --verify --deep --strict "$APP" 2>/dev/null \
   && ok "签名完整" || { printf '✗ 签名校验未通过\n'; failed=true; }
 
-xcrun stapler validate "$APP" >/dev/null 2>&1 \
-  && ok "公证票据已装订到 .app" || { printf '✗ .app 未装订公证票据\n'; failed=true; }
-
-# 这一条才是用户下载后真正会遇到的判定
-if spctl -a -vv "$APP" 2>&1 | grep -q "source=Notarized Developer ID"; then
-  ok "Gatekeeper 通过（Notarized Developer ID）"
-else
-  printf '✗ Gatekeeper 未通过：\n'
-  spctl -a -vv "$APP" 2>&1 | sed 's/^/    /'
-  failed=true
-fi
-
-if [[ -n "$DMG" ]]; then
-  xcrun stapler validate "$DMG" >/dev/null 2>&1 \
-    && ok "dmg 已装订" || printf '⚠ dmg 未装订（.app 已装订则不影响使用）\n'
-fi
+# 公证已注释掉（见上），所以不装订、不校验 Notarized Developer ID——
+# 首次打开会被 Gatekeeper 拦一次，需要右键「打开」放行。
 
 step "产物"
 printf '  %s\n' "$APP"
