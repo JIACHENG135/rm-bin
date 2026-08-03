@@ -168,34 +168,6 @@
     text-align: center;
   }
 
-  /* ————— 模式表 ————— */
-  .modes { margin: 1.8rem 0 0; }
-  .mode {
-    display: flex;
-    gap: 1rem;
-    padding: 0.9rem 0;
-    border-top: 1px solid var(--rule);
-  }
-  .mode:last-child { border-bottom: 1px solid var(--rule); }
-  .mode dt {
-    flex: none;
-    width: 9.5rem;
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-  .mode dd { font-size: 0.92rem; line-height: 1.6; color: var(--ink-soft); }
-  .tag {
-    display: inline-block;
-    font-size: 0.72rem;
-    color: var(--ink-faint);
-    border: 1px solid var(--rule);
-    border-radius: 4px;
-    padding: 0.05rem 0.4rem;
-    margin-left: 0.4rem;
-    vertical-align: 1px;
-    white-space: nowrap;
-  }
-
   /* ————— 安装 ————— */
   pre {
     background: var(--card);
@@ -239,8 +211,8 @@
     <div class="wordmark">RM Bin</div>
     <h1>拖一张图进去，<br />它出现在你的 reMarkable 上。</h1>
     <p class="lede">
-      一枚停在桌角的迷你 Paper Pro。松手的那一刻，窗口里的小屏幕和你手边的真机
-      同时开始落墨——同一幅画，同一个节奏。
+      一枚停在桌角的迷你 Paper Pro。松手的那一刻，图片被包成一份 PDF，秒级送到
+      设备的文档库里——原图，能用笔批注。
     </p>
 
     <div class="stage">
@@ -250,7 +222,7 @@
     <div class="actions">
       <a class="download" href="https://github.com/JIACHENG135/rm-bin/releases/latest">下载 for macOS</a>
       <span class="meta">
-        v0.3.0 · Apple Silicon · 已签名并公证 ·
+        v0.4.0 · Apple Silicon · 已用 Developer ID 签名 ·
         <a href="https://github.com/JIACHENG135/rm-bin">源码</a>
       </span>
     </div>
@@ -267,52 +239,15 @@
       </div>
       <div class="step">
         <span class="n">02</span>
-        <h3>描</h3>
-        <p>图像被转成笔画。你选的方式决定它是被一笔笔写下去，还是整页递过去。</p>
+        <h3>传</h3>
+        <p>图片包成单页 PDF，交给设备自己的 USB 网页导入接口。</p>
       </div>
       <div class="step">
         <span class="n">03</span>
-        <h3>落墨</h3>
-        <p>扫描线自上而下推进——它跟的是设备的真实进度，不是计时器。</p>
+        <h3>落地</h3>
+        <p>完成时 Marker 手写一个对勾；连不上设备就摇头，不骗你。</p>
       </div>
     </div>
-  </section>
-
-  <section>
-    <div class="rules"><i></i><i></i><i></i></div>
-    <h2>五种落墨方式</h2>
-    <p>
-      同一张图，可以用五种方式抵达设备。它们是真正不同的取舍，所以做成了设置项，
-      而不是藏在代码里的常量。
-    </p>
-
-    <dl class="modes">
-      <div class="mode">
-        <dt>笔重放<span class="tag">默认</span></dt>
-        <dd>假装成设备的笔，一笔一笔写进去。窗口里的小屏幕跟着真机同步画出同一幅——这是唯一「正在发生」的那种。内容多时要几分钟。</dd>
-      </div>
-      <div class="mode">
-        <dt>写入笔记本</dt>
-        <dd>直接生成一本新笔记送过去，几秒完成，落在干净的新页上。代价是设备要重启一次界面才能看到它。</dd>
-      </div>
-      <div class="mode">
-        <dt>直接显示</dt>
-        <dd>原图灰阶，直接推到屏幕上。最快，但不留在笔记里。</dd>
-      </div>
-      <div class="mode">
-        <dt>Gemini 线稿 + 笔重放</dt>
-        <dd>先把照片转成线稿再重放。照片直接描摹通常是一团糊，这条路让它可用。</dd>
-      </div>
-      <div class="mode">
-        <dt>存成 PDF</dt>
-        <dd>原图保真，进设备的文档库，可以在上面批注。</dd>
-      </div>
-    </dl>
-
-    <figure>
-      <img src="img/modes.jpg" alt="设置面板中的绘制方式选择" />
-      <figcaption>设置面板 · 每一项都写清了它的代价</figcaption>
-    </figure>
   </section>
 
   <section>
@@ -336,17 +271,17 @@
     <div class="rules"><i></i><i></i><i></i></div>
     <h2>装它</h2>
     <p>
-      下载 <code>.dmg</code>，拖进「应用程序」。App 已用 Developer ID 签名并通过 Apple 公证，
-      首次打开不会被拦。
+      下载 <code>.dmg</code>，拖进「应用程序」。App 已用 Developer ID 签名，首次打开如果被
+      Gatekeeper 拦下，右键点「打开」放行一次即可。
     </p>
     <p>
-      设备地址在 <strong>设置 › 通用 › 关于本机 › 版权与许可</strong> 里；USB 直连时固定是
+      设备上需要打开「设置 › 通用 › 存储 › USB 网页界面」，并用 USB 线连接——默认地址固定是
       <code>10.11.99.1</code>。
     </p>
     <ul>
       <li>macOS 11 或更新（Liquid Glass 效果需要 macOS 26）</li>
       <li>Apple Silicon</li>
-      <li>reMarkable 2 / Paper Pro，与电脑在同一网络，或用 USB 直连</li>
+      <li>reMarkable 2 / Paper Pro，USB 直连，或与电脑同网络（走 ssh 回退）</li>
     </ul>
   </section>
 
