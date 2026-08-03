@@ -256,32 +256,6 @@ body {
   color: var(--label);
 }
 
-/* ————— radio row —————
-   No 52px label column here: the choice's own name is the label, so the
-   control leads and the trade-off it costs sits at the far right. */
-.choice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 12px;
-}
-
-.choice input {
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.choice-title {
-  color: var(--label);
-}
-
-.choice-hint {
-  margin-left: auto;
-  color: var(--tertiary);
-  font-size: 11px;
-}
-
 /* ————— footnote ————— */
 .footnote {
   margin: 8px 4px 0;

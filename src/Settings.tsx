@@ -3,58 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-/** Kept in step with `settings::Mode` on the Rust side. */
-type Mode = "pen" | "file" | "screen" | "sketch" | "pdf" | "markdown" | "vector";
+const DEFAULTS = { host: "10.11.99.1", port: 22 };
 
-const DEFAULTS = { host: "10.11.99.1", port: 22, mode: "pen" as Mode };
+type Config = { host: string; port: number };
 
-type Config = { host: string; port: number; mode: Mode };
-
-/** The two ways a drawing can get onto the tablet, and what each costs. */
-const MODES: { id: Mode; title: string; hint: string; note: string }[] = [
-  {
-    id: "pen",
-    title: "笔重放",
-    hint: "边画边看",
-    note: "假装成设备的笔，一笔一笔写进去——窗口里的小屏幕跟着真机同步画出同一幅。画在当前打开的那一页上，内容多时要几分钟。",
-  },
-  {
-    id: "file",
-    title: "写入笔记本",
-    hint: "秒级完成",
-    note: "直接生成一本新笔记送过去，几秒完成，落在干净的新页上。设备会重启一次界面才能看到它，窗口里的绘制是事后回放。",
-  },
-  {
-    id: "screen",
-    title: "直接显示",
-    hint: "原图灰阶",
-    note: "不描线，把原图按 1620×2160 直接画到屏幕上——照片就是照片，有完整的灰阶层次。代价是它不是文档：显示期间设备界面被暂停，内容不会保存，十分钟后自动恢复（也可在右键菜单里立刻恢复）。",
-  },
-  {
-    id: "sketch",
-    title: "Gemini 线稿 + 笔重放",
-    hint: "照片可用",
-    note: "先让 Gemini 把图重画成干净线稿，再用笔一笔笔写上去。照片终于能出好结果——但落到纸上的是一幅「照着画的画」，不是原图；本来就干净的线稿别用这个。需要环境变量 GEMINI_API_KEY（从访达启动的话，要先 launchctl setenv）。",
-  },
-  {
-    id: "pdf",
-    title: "存成 PDF",
-    hint: "原图 · 可批注",
-    note: "把图片包成单页 PDF 交给设备自己的导入接口。唯一同时做到「是原图、是文档、能用笔批注」的一种，而且不用 SSH、不用停设备界面。前提是设备上打开了「设置 › 通用 › 存储 › USB 网页界面」，并用 USB 线连接（地址 10.11.99.1）。",
-  },
-  {
-    id: "markdown",
-    title: "截图转笔记",
-    hint: "文字 · 笔重放",
-    note: "把截图交给 Gemini 转写成 markdown（标题、正文、列表、表格），再用笔一笔笔写上去——文字走矢量字体和印刷体中文描线，不是整页低分辨率描线，小字也能读。落到纸上的是「转写稿」，不是原图的样子。同样需要 GEMINI_API_KEY。",
-  },
-  {
-    id: "vector",
-    title: "轮廓描边",
-    hint: "图标 · 黑白",
-    note: "适合 logo、图标、纯色截图这类没有灰阶层次的图——描的是色块的轮廓边缘，不是骨架中线。填色区域用骨架描线只会找出一条没有意义的脊线；这个模式直接画出形状本身的边界。不识别灰阶或彩色渐变，只分黑白两色。",
-  },
-];
 type Probe = { ok: boolean; latency_ms: number; detail: string };
 type Status =
   | { kind: "idle" }
@@ -150,19 +102,6 @@ export default function Settings() {
       setError(String(e));
     }
   }, [host, port, config, probe]);
-
-  /* Mode is a click, not a field: it commits the moment it changes, and it
-     carries the last *saved* host rather than whatever is being typed. */
-  const chooseMode = async (mode: Mode) => {
-    if (mode === config.mode) return;
-    const next = { ...config, mode };
-    setConfig(next);
-    try {
-      if (IS_TAURI) setConfig(await call<Config>("save_settings", { settings: next }));
-    } catch (e) {
-      setError(String(e));
-    }
-  };
 
   const revert = () => {
     setHost(config.host);
@@ -305,30 +244,6 @@ export default function Settings() {
             : status.kind === "fail" && status.detail
             ? status.detail
             : "通过 USB 连接时地址固定为 10.11.99.1。使用 Wi-Fi 时，请在设备上打开「设置 › 通用 › 关于本机 › 版权与许可」查看 IP 地址。"}
-        </p>
-
-        <h2 className="group-title">绘制方式</h2>
-
-        <div className="group">
-          {MODES.map((m, i) => (
-            <div key={m.id}>
-              {i > 0 && <div className="separator" />}
-              <label className="choice">
-                <input
-                  type="radio"
-                  name="mode"
-                  checked={config.mode === m.id}
-                  onChange={() => chooseMode(m.id)}
-                />
-                <span className="choice-title">{m.title}</span>
-                <span className="choice-hint">{m.hint}</span>
-              </label>
-            </div>
-          ))}
-        </div>
-
-        <p className="footnote">
-          {MODES.find((m) => m.id === config.mode)?.note}
         </p>
       </div>
 

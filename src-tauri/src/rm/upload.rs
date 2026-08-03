@@ -1,16 +1,6 @@
-//! Putting a finished notebook onto the tablet.
-//!
-//! `rmfile` produces the three files xochitl wants — `<doc>.metadata`,
-//! `<doc>.content` and `<doc>/<page>.rm` — and this puts them in its document
-//! store. That store is a plain directory, so "installing" a notebook is
-//! writing three files into it; the only awkward part is that xochitl reads
-//! the directory once, at startup, and has no reload anyone can call. So the
-//! last thing this does is restart it.
-//!
-//! The restart is the price of this path. What it buys, against replaying the
-//! pen: the drawing lands whole in about a second instead of crawling in over
-//! minutes, it lands on a *new* page instead of on top of whatever was open,
-//! and it can't blunder into the toolbar, because there is no pen involved.
+//! Putting files onto the tablet by writing straight into xochitl's document
+//! store over ssh — the PDF importer's fallback when the USB web interface
+//! isn't reachable.
 
 use std::io::Write;
 use std::process::Stdio;
@@ -21,50 +11,11 @@ use crate::rm::rmfile;
 /// xochitl's document store. Same path on both generations.
 const STORE: &str = "/home/root/.local/share/remarkable/xochitl";
 
-/// A notebook as three files, named and ready to be written.
-pub struct Notebook {
-    pub doc: String,
-    pub page: String,
-    pub metadata: String,
-    pub content: String,
-    pub page_bytes: Vec<u8>,
-}
-
-impl Notebook {
-    /// Total bytes that will cross the wire.
-    pub fn len(&self) -> usize {
-        self.metadata.len() + self.content.len() + self.page_bytes.len()
-    }
-}
-
-/// Serialise `strokes` (already in page coordinates) as a one-page notebook
-/// called `name`.
-pub fn build(name: &str, strokes: &[Vec<rmfile::Point>], now_ms: u128) -> Notebook {
-    let doc = uuid();
-    let page = uuid();
-    Notebook {
-        metadata: rmfile::metadata(name, now_ms),
-        content: rmfile::content(&page, now_ms),
-        page_bytes: rmfile::page(strokes),
-        doc,
-        page,
-    }
-}
-
 /// One file to place in the document store: a name relative to it, and the
 /// bytes.
 pub struct Entry {
     pub name: String,
     pub bytes: Vec<u8>,
-}
-
-/// The three files a notebook is, in the order they go down the wire.
-pub(super) fn entries(nb: &Notebook) -> Vec<Entry> {
-    vec![
-        Entry { name: format!("{}.metadata", nb.doc), bytes: nb.metadata.clone().into_bytes() },
-        Entry { name: format!("{}.content", nb.doc), bytes: nb.content.clone().into_bytes() },
-        Entry { name: format!("{}/{}.rm", nb.doc, nb.page), bytes: nb.page_bytes.clone() },
-    ]
 }
 
 /// The shell run on the tablet: write every file, flush, restart.
@@ -103,20 +54,7 @@ pub(super) fn script_for(files: &[Entry], dirs: &[String]) -> String {
     s
 }
 
-/// Write `nb` into the tablet's document store and restart xochitl so it
-/// appears. Returns once the restart has been asked for — xochitl takes a few
-/// seconds more to come back up on its own.
-pub fn install(host: &str, port: u16, nb: &Notebook) -> Result<(), String> {
-    install_files(host, port, &entries(nb), std::slice::from_ref(&nb.doc))
-}
-
 /// Place a set of files in xochitl's document store and restart it.
-///
-/// Shared by the notebook writer and the PDF importer's ssh path, because
-/// what they need is identical and the awkward parts — one connection, exact
-/// framing down a single shared stdin, and a restart that must not happen
-/// until every file has landed — are worth having in one place rather than
-/// two.
 pub fn install_files(host: &str, port: u16, files: &[Entry], dirs: &[String]) -> Result<(), String> {
     let script = script_for(files, dirs);
 
@@ -188,7 +126,7 @@ pub(crate) fn uuid() -> String {
     rmfile::uuid_string(&b)
 }
 
-/// A notebook name from the dropped file: the image's own name, since that is
+/// A document name from the dropped file: the image's own name, since that is
 /// what the person will look for in the document list.
 pub fn name_from_path(path: &str) -> String {
     std::path::Path::new(path)

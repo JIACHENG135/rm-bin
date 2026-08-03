@@ -1,5 +1,5 @@
 /// `pub` so the debug binaries under `src/bin/` — which link against this
-/// crate like any external consumer would — can reach `rm::markdown` and
+/// crate like any external consumer would — can reach `rm::pdf` and
 /// `rm::device` without duplicating them.
 pub mod rm;
 mod settings;
@@ -7,52 +7,24 @@ mod settings;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
-/// The strokes about to be drawn, in image coordinates and in drawing order —
-/// sent once, as soon as tracing finishes, so the window can ink the same
-/// lines onto its little screen that the tablet is inking onto the page.
+/// No strokes to trace, so the window has nothing to ink — it holds the
+/// dropped photo and fades it as the upload lands, which `PROGRESS_EVENT`
+/// drives. `PLAN_EVENT` is emitted once, empty, just to tell the frontend
+/// there's no line work coming.
 const PLAN_EVENT: &str = "draw-plan";
-/// How many strokes the tablet has inked so far, fractional. Paired with
-/// `draw-plan` this is the whole synchronisation: the window isn't running an
-/// animation that happens to take the right amount of time, it's drawing the
-/// same strokes in the same order at the same moment.
 const PROGRESS_EVENT: &str = "draw-progress";
-/// Don't emit for every 480-byte chunk — the webview can't use the
-/// resolution and the IPC traffic is pure overhead.
-const PROGRESS_STEPS: f64 = 240.0;
 
-/// How long the window takes to ink a drawing that was sent as a file.
-///
-/// In `Mode::Pen` the window has something real to follow and this doesn't
-/// apply. In `Mode::File` the page lands whole in about a second, so there is
-/// no arrival to mirror and the window is honestly just replaying what was
-/// sent. It still draws it stroke by stroke — watching it appear is the point
-/// of the thing — but the clock is this constant rather than the tablet.
-const FILE_REPLAY: std::time::Duration = std::time::Duration::from_millis(2200);
-
-/// Trace the image and draw it on the configured reMarkable, reporting how
-/// far the ink has got as it goes.
+/// Wrap the image in a one-page PDF and hand it to the tablet's importer.
 #[tauri::command]
 async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<String, String> {
     let cfg = settings::load_settings(app.clone());
-    // Tracing is seconds of CPU and the push is minutes of paced IO; neither
-    // belongs on a runtime thread the UI shares.
+    // Building the PDF is seconds of CPU and the upload is network IO;
+    // neither belongs on a runtime thread the UI shares.
     tauri::async_runtime::spawn_blocking(move || {
-        let r = match cfg.mode {
-            settings::Mode::Pen => draw_with_pen(&app, &cfg, &path),
-            settings::Mode::File => draw_as_file(&app, &cfg, &path),
-            settings::Mode::Screen => show_on_screen(&app, &cfg, &path),
-            settings::Mode::Sketch => draw_sketch(&app, &cfg, &path),
-            settings::Mode::Pdf => send_as_pdf(&app, &cfg, &path),
-            settings::Mode::Markdown => draw_markdown_note(&app, &cfg, &path),
-            settings::Mode::Vector => draw_vector(&app, &cfg, &path),
-        };
-        // The window's whole vocabulary for failure is a head-shake, which
-        // says that something went wrong and nothing about what. Everything
-        // here can fail for a reason that lives on the other end of an ssh
-        // connection, so the reason goes to the terminal as well.
+        let r = send_as_pdf(&app, &cfg, &path);
         match &r {
             Ok(msg) => eprintln!("[rm-bin] {msg}"),
-            Err(e) => eprintln!("[rm-bin] {:?} failed: {e}", cfg.mode),
+            Err(e) => eprintln!("[rm-bin] pdf upload failed: {e}"),
         }
         r
     })
@@ -60,64 +32,16 @@ async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<Strin
     .map_err(|e| format!("绘制任务中断：{e}"))?
 }
 
-/// The device half, carried inside the app.
-///
-/// Embedded rather than shipped as a Tauri resource next to the binary: they
-/// are 160 kB together, and a resource that can go missing turns a working
-/// install into a runtime failure on a path that already has a device, an ssh
-/// key and a stopped xochitl to go wrong. `include_bytes!` cannot be missing.
-const RMFB_AGENT: &[u8] = include_bytes!("../resources/rmfb/rmfb-agent");
-const RMFB_SHIM: &[u8] = include_bytes!("../resources/rmfb/librmfb.so");
-
-/// Paint the image onto the panel itself.
-///
-/// There are no strokes here, so the window has nothing to ink — it holds the
-/// photo and desaturates it as the bands land, which is what is happening on
-/// the tablet: the same picture, arriving, in grey.
-fn show_on_screen(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    rm::screen::deploy(&cfg.host, cfg.port, RMFB_AGENT, RMFB_SHIM)?;
-
-    // An empty plan tells the frontend there is no line work coming, so it
-    // keeps the photograph up instead of fading it out behind strokes.
-    let _ = app.emit(PLAN_EVENT, Vec::<rm::draw::PreviewStroke>::new());
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-
-    let mut screen = rm::screen::Screen::open(&cfg.host, cfg.port)?;
-    let grey = rm::screen::fit(path, &screen.panel)?;
-    let (w, h) = (screen.panel.width, screen.panel.height);
-
-    let result = rm::screen::show(&mut screen, &grey, |p| {
-        let _ = app.emit(PROGRESS_EVENT, p);
-    });
-    let _ = app.emit(PROGRESS_EVENT, 1.0);
-    if let Err(e) = result {
-        // A half-painted panel with xochitl stopped is the worst state to
-        // leave a tablet in; on success it stays, because the picture is the
-        // whole point, but a failure gives the device straight back.
-        drop(screen);
-        let _ = rm::screen::restore(&cfg.host, cfg.port);
-        return Err(e);
-    }
-
-    Ok(format!("showed {w}x{h} on the panel at {}", cfg.host))
-}
-
-/// Wrap the image in a one-page PDF and hand it to the tablet's importer.
-///
-/// No strokes and no panel takeover, so the window does what it does in
-/// screen mode: holds the photograph and desaturates it while the document
-/// crosses. That is the honest picture of this path — what arrives is the
-/// image, unchanged apart from being in a document.
+/// No strokes and no panel takeover — the window holds the photograph and
+/// desaturates it while the document crosses. That is the honest picture of
+/// this path: what arrives is the image, unchanged apart from being in a
+/// document.
 fn send_as_pdf(
     app: &tauri::AppHandle,
     cfg: &settings::Settings,
     path: &str,
 ) -> Result<String, String> {
-    let _ = app.emit(PLAN_EVENT, Vec::<rm::draw::PreviewStroke>::new());
+    let _ = app.emit(PLAN_EVENT, Vec::<(f64, f64)>::new());
     let _ = app.emit(PROGRESS_EVENT, 0.0);
 
     let pdf = rm::pdf::build(path)?;
@@ -138,274 +62,6 @@ fn send_as_pdf(
     Ok(format!(
         "uploaded \"{name}.pdf\" ({size} bytes) to {} via {route}",
         cfg.host
-    ))
-}
-
-/// Redraw the image as line art, then ink that.
-///
-/// The window shows the original photo throughout, including the half-minute
-/// the model takes, and then the strokes that appear over it are the
-/// redrawing's. That mismatch is real and is the mode's nature: what reaches
-/// the page is a drawing *of* the photo, and the window is honest about which
-/// one it is holding by keeping the photo until ink starts landing on it.
-fn draw_sketch(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let sketch = rm::gemini::to_line_art(path)?;
-
-    // Keep the redraw rather than deleting it. What comes back is the only
-    // part of this mode nobody can see — the tablet shows the traced
-    // skeleton, which is a poor witness to whether the model drew something
-    // good — and it is what you look at to decide whether the prompt needs
-    // changing. Kept per-drop rather than overwritten, so attempts can be
-    // compared.
-    let sketch = match keep_sketch(app, path, &sketch) {
-        Ok(kept) => kept,
-        Err(e) => {
-            eprintln!("[rm-bin] could not file the redraw ({e}); using it from /tmp");
-            sketch
-        }
-    };
-    eprintln!("[rm-bin] redraw saved: {}", sketch.display());
-
-    draw_with_pen(app, cfg, &sketch.to_string_lossy())
-        .map(|msg| format!("{msg}, from the redraw at {}", sketch.display()))
-}
-
-/// Move a redraw out of the temp directory into the app's own folder, named
-/// after the image it came from and when.
-fn keep_sketch(
-    app: &tauri::AppHandle,
-    original: &str,
-    sketch: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager;
-
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?
-        .join("sketches");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let stem = std::path::Path::new(original)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "image".into());
-    let ext = sketch.extension().and_then(|e| e.to_str()).unwrap_or("png");
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dest = dir.join(format!("{stem}-{secs}.{ext}"));
-
-    // Rename first: it is atomic and free when both are on the same volume.
-    // The temp directory usually isn't, hence the copy.
-    if std::fs::rename(sketch, &dest).is_err() {
-        std::fs::copy(sketch, &dest).map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_file(sketch);
-    }
-    Ok(dest)
-}
-
-/// Transcribe the screenshot as markdown, then lay *that* out and ink it —
-/// `draw_sketch`'s counterpart for pages of text rather than pictures.
-///
-/// The window keeps showing the original screenshot until the transcription
-/// comes back, the same honesty `draw_sketch` practises: what lands on the
-/// page is a transcription, not the photo, and there is nothing truthful to
-/// ink before Gemini has actually produced it.
-fn draw_markdown_note(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let text = rm::gemini::to_markdown(path)?;
-
-    // Keep the transcription for the same reason `draw_sketch` keeps the
-    // redrawn line art: it's the only part of this mode a person can
-    // actually read back and judge, since what lands on the tablet is ink,
-    // not text. Kept per-drop, not overwritten, so a bad prompt tweak shows
-    // up as a diff against the last attempt rather than just disappearing.
-    let saved = match keep_markdown(app, path, &text) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("[rm-bin] could not file the transcription ({e})");
-            None
-        }
-    };
-    if let Some(p) = &saved {
-        eprintln!("[rm-bin] transcription saved: {}", p.display());
-    }
-
-    let calib = rm::device::detect(&cfg.host, cfg.port)?;
-    let plan = rm::markdown::plan(&text, &calib)?;
-    let (total, count) = (plan.bytes.len(), plan.stroke_count());
-
-    let _ = app.emit(PLAN_EVENT, &plan.preview);
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-
-    let step = count as f64 / PROGRESS_STEPS;
-    let mut last = 0.0f64;
-    let result = rm::device::push(&cfg.host, cfg.port, &calib, &plan.bytes, |written| {
-        let done = plan.strokes_done(written);
-        if done - last >= step {
-            last = done;
-            let _ = app.emit(PROGRESS_EVENT, done);
-        }
-    });
-    let _ = app.emit(PROGRESS_EVENT, count as f64);
-    result?;
-
-    Ok(format!(
-        "wrote {count} strokes ({total} bytes) from a {}-character transcription on {:?} at {}{}",
-        text.chars().count(),
-        calib.model,
-        cfg.host,
-        saved.map(|p| format!(", saved at {}", p.display())).unwrap_or_default()
-    ))
-}
-
-/// Move a transcription out of the temp directory into the app's own
-/// folder, named after the screenshot it came from and when — the
-/// `keep_sketch` of markdown text.
-fn keep_markdown(app: &tauri::AppHandle, original: &str, text: &str) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("transcripts");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let stem = std::path::Path::new(original)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "image".into());
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dest = dir.join(format!("{stem}-{secs}.md"));
-    std::fs::write(&dest, text).map_err(|e| e.to_string())?;
-    Ok(dest)
-}
-
-/// Hand the tablet's own interface back, rather than waiting for the device's
-/// own timer.
-#[tauri::command]
-async fn restore_device(app: tauri::AppHandle) -> Result<(), String> {
-    let cfg = settings::load_settings(app);
-    tauri::async_runtime::spawn_blocking(move || rm::screen::restore(&cfg.host, cfg.port))
-        .await
-        .map_err(|e| format!("恢复中断：{e}"))?
-}
-
-/// Replay the strokes through the pen digitizer, with the window inking each
-/// one as the tablet inks it.
-fn draw_with_pen(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let calib = rm::device::detect(&cfg.host, cfg.port)?;
-    let plan = rm::draw::plan(path, &calib)?;
-    let (total, count) = (plan.bytes.len(), plan.stroke_count());
-
-    let _ = app.emit(PLAN_EVENT, &plan.preview);
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-
-    // Fractional on purpose: a drawing of 39 strokes would otherwise
-    // report only 39 times and the window would ink it in visible jerks.
-    // `strokes_done` is continuous, so this can be finer than one stroke.
-    let step = count as f64 / PROGRESS_STEPS;
-    let mut last = 0.0f64;
-    let result = rm::device::push(&cfg.host, cfg.port, &calib, &plan.bytes, |written| {
-        let done = plan.strokes_done(written);
-        if done - last >= step {
-            last = done;
-            let _ = app.emit(PROGRESS_EVENT, done);
-        }
-    });
-    // Even on failure the window should settle rather than freeze
-    // part-drawn; the error itself is what it reacts to.
-    let _ = app.emit(PROGRESS_EVENT, count as f64);
-    result?;
-
-    Ok(format!(
-        "drew {count} strokes ({total} bytes) on {:?} at {}",
-        calib.model, cfg.host
-    ))
-}
-
-/// `draw_with_pen`'s counterpart for `Mode::Vector`: same pen-replay
-/// machinery, a contour trace from `rm::vectorize` instead of a skeleton
-/// trace from `rm::draw` feeding it. See `vectorize.rs`'s module doc for
-/// why a flat graphic image wants a different tracer than a photograph
-/// does.
-fn draw_vector(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let calib = rm::device::detect(&cfg.host, cfg.port)?;
-    let plan = rm::vectorize::plan(path, &calib)?;
-    let (total, count) = (plan.bytes.len(), plan.stroke_count());
-
-    let _ = app.emit(PLAN_EVENT, &plan.preview);
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-
-    let step = count as f64 / PROGRESS_STEPS;
-    let mut last = 0.0f64;
-    let result = rm::device::push(&cfg.host, cfg.port, &calib, &plan.bytes, |written| {
-        let done = plan.strokes_done(written);
-        if done - last >= step {
-            last = done;
-            let _ = app.emit(PROGRESS_EVENT, done);
-        }
-    });
-    let _ = app.emit(PROGRESS_EVENT, count as f64);
-    result?;
-
-    Ok(format!(
-        "traced {count} contour strokes ({total} bytes) on {:?} at {}",
-        calib.model, cfg.host
-    ))
-}
-
-/// Write the strokes as a finished `.rm` notebook and install it.
-///
-/// The window is deliberately left showing the photo until the upload has
-/// actually succeeded: unlike the pen path there is no partial state to be
-/// faithful to, so the only honest moment to start inking is once the page is
-/// really on the tablet. A failure therefore never draws anything.
-fn draw_as_file(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let calib = rm::device::detect(&cfg.host, cfg.port)?;
-    let page = rm::draw::page(path, &calib)?;
-    let count = page.preview.len();
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let notebook = rm::upload::build(&rm::upload::name_from_path(path), &page.strokes, now_ms);
-    let bytes = notebook.len();
-    rm::upload::install(&cfg.host, cfg.port, &notebook)?;
-
-    // On the tablet the drawing is already whole; this is the window catching
-    // up with it.
-    let _ = app.emit(PLAN_EVENT, &page.preview);
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-    let tick = FILE_REPLAY.div_f64(PROGRESS_STEPS);
-    for i in 1..=PROGRESS_STEPS as u32 {
-        std::thread::sleep(tick);
-        let _ = app.emit(PROGRESS_EVENT, count as f64 * i as f64 / PROGRESS_STEPS);
-    }
-
-    Ok(format!(
-        "wrote {count} strokes ({bytes} bytes) to notebook {} on {:?} at {}",
-        notebook.doc, calib.model, cfg.host
     ))
 }
 
@@ -446,7 +102,6 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             send_to_remarkable,
-            restore_device,
             settings::load_settings,
             settings::save_settings,
             settings::test_connection,
@@ -490,13 +145,6 @@ pub fn run() {
             app.on_menu_event(|app, event| {
                 if event.id() == "open-settings" {
                     let _ = settings::open_settings(app.clone());
-                } else if event.id() == "restore-device" {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) = restore_device(app).await {
-                            eprintln!("restore failed: {e}");
-                        }
-                    });
                 }
             });
 

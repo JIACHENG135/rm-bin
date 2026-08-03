@@ -1,21 +1,17 @@
 //! The parts of the upload that can be wrong without anything complaining.
 //!
-//! `install` itself needs a tablet, but everything it depends on being right —
-//! that the remote script asks for exactly the bytes we send, in the order we
-//! send them, and that the names inside the notebook agree — is checkable
-//! here, and each of these is a failure that would otherwise show up as a
-//! notebook that quietly doesn't open.
+//! `install_files` itself needs a tablet, but everything it depends on being
+//! right — that the remote script asks for exactly the bytes we send, in the
+//! order we send them, and that it restarts xochitl only after every write —
+//! is checkable here.
 
-use super::rmfile::Point;
-use super::upload;
+use super::upload::{self, Entry};
 
-fn strokes() -> Vec<Vec<Point>> {
+fn entries() -> Vec<Entry> {
     vec![
-        vec![
-            Point { x: -300.0, y: 200.0 },
-            Point { x: 300.0, y: 220.0 },
-        ],
-        vec![Point { x: 0.0, y: 400.0 }, Point { x: 10.0, y: 900.0 }],
+        Entry { name: "a.metadata".into(), bytes: vec![1, 2, 3] },
+        Entry { name: "a.content".into(), bytes: vec![4, 5] },
+        Entry { name: "a/p.rm".into(), bytes: vec![6, 7, 8, 9] },
     ]
 }
 
@@ -32,30 +28,22 @@ fn dd_sizes(script: &str) -> Vec<usize> {
         .collect()
 }
 
-/// The whole framing rests on this: three files arrive down one stdin, and
-/// each `dd` has to take exactly its own file's bytes. If a count and a
-/// payload ever disagree, every file after it is shifted and the notebook is
+/// The whole framing rests on this: files arrive down one stdin, and each
+/// `dd` has to take exactly its own file's bytes. If a count and a payload
+/// ever disagree, every file after it is shifted and the document is
 /// silently garbage.
 #[test]
 fn the_script_asks_for_exactly_the_bytes_that_are_sent() {
-    let nb = upload::build("drawing", &strokes(), 1_700_000_000_000);
-    assert_eq!(
-        dd_sizes(&upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc))),
-        vec![nb.metadata.len(), nb.content.len(), nb.page_bytes.len()],
-        "dd sizes must match the payloads, in the order install() writes them"
-    );
-    assert_eq!(
-        nb.len(),
-        nb.metadata.len() + nb.content.len() + nb.page_bytes.len()
-    );
+    let files = entries();
+    let script = upload::script_for(&files, &["a".into()]);
+    assert_eq!(dd_sizes(&script), files.iter().map(|f| f.bytes.len()).collect::<Vec<_>>());
 }
 
-/// `set -e` is what keeps a half-written notebook from being followed by a
+/// `set -e` is what keeps a half-written document from being followed by a
 /// restart that publishes it, and the restart has to be the last thing.
 #[test]
 fn the_script_aborts_on_error_and_restarts_last() {
-    let nb = upload::build("drawing", &strokes(), 1);
-    let script = upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc));
+    let script = upload::script_for(&entries(), &["a".into()]);
     assert!(script.starts_with("set -e"), "{script}");
 
     let lines: Vec<_> = script.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -68,25 +56,14 @@ fn the_script_aborts_on_error_and_restarts_last() {
     assert!(last_write < restart, "restart must follow every write");
 }
 
-/// The tablet reads the page's own uuid out of `.content`; if the two names
-/// disagree the notebook opens empty.
 #[test]
-fn the_page_is_named_the_same_in_the_content_file() {
-    let nb = upload::build("drawing", &strokes(), 1);
-    assert!(nb.content.contains(&nb.page));
-    assert!(upload::script_for(&upload::entries(&nb), std::slice::from_ref(&nb.doc)).contains(&format!("{}/{}.rm", nb.doc, nb.page)));
-    assert_ne!(nb.doc, nb.page);
-}
-
-#[test]
-fn each_notebook_gets_its_own_identity() {
-    let a = upload::build("x", &strokes(), 1);
-    let b = upload::build("x", &strokes(), 1);
-    assert_ne!(a.doc, b.doc);
-    assert_ne!(a.page, b.page);
+fn each_call_gets_its_own_identity() {
+    let a = upload::uuid();
+    let b = upload::uuid();
+    assert_ne!(a, b);
 
     // 8-4-4-4-12 lowercase hex.
-    for id in [&a.doc, &a.page] {
+    for id in [&a, &b] {
         let parts: Vec<_> = id.split('-').map(str::len).collect();
         assert_eq!(parts, vec![8, 4, 4, 4, 12], "{id}");
         assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{id}");
@@ -106,10 +83,6 @@ fn names_come_from_the_file_and_cannot_break_the_metadata() {
 
     let nasty = upload::name_from_path("/tmp/a\"b\\c\nd.png");
     assert!(!nasty.contains(['"', '\\', '\n']), "{nasty}");
-
-    let nb = upload::build(&nasty, &strokes(), 1);
-    serde_json::from_str::<serde_json::Value>(&nb.metadata).expect("metadata must be valid JSON");
-    serde_json::from_str::<serde_json::Value>(&nb.content).expect("content must be valid JSON");
 }
 
 /// A long filename shouldn't produce an unreadable entry in the document list.
