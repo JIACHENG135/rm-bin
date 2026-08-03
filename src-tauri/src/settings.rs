@@ -257,7 +257,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("RM Bin 设置")
-            .inner_size(460.0, 560.0)
+            .inner_size(460.0, 330.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
