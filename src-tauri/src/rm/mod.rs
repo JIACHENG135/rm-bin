@@ -48,6 +48,29 @@ pub mod pdf;
 #[path = "pdf_test.rs"]
 mod pdf_test;
 
+/// Contour tracing for flat, graphic images — a logo, an icon, a UI
+/// screenshot — where a filled region's *outline* is the meaningful shape
+/// and a skeleton centreline would find nothing. See the module doc.
+pub mod vectorize;
+
+#[cfg(test)]
+#[path = "vectorize_test.rs"]
+mod vectorize_test;
+
+/// Hershey vector-font strokes for Latin text — `markdown.rs`'s text
+/// pipeline for the one script the raster-trace approach turned out not
+/// to suit. See its module doc for what was tried and why.
+pub mod hershey;
+
+/// Markdown, laid out and drawn block by block instead of traced whole —
+/// text goes through a real font instead of through the whole-page raster
+/// that makes small type illegible. See the module doc for the full case.
+pub mod markdown;
+
+#[cfg(test)]
+#[path = "markdown_test.rs"]
+mod markdown_test;
+
 #[cfg(test)]
 #[path = "rmfile_test.rs"]
 mod rmfile_test;

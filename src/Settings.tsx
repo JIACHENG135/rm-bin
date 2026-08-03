@@ -4,7 +4,7 @@ const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** Kept in step with `settings::Mode` on the Rust side. */
-type Mode = "pen" | "file" | "screen" | "sketch" | "pdf";
+type Mode = "pen" | "file" | "screen" | "sketch" | "pdf" | "markdown" | "vector";
 
 const DEFAULTS = { host: "10.11.99.1", port: 22, mode: "pen" as Mode };
 
@@ -41,6 +41,18 @@ const MODES: { id: Mode; title: string; hint: string; note: string }[] = [
     title: "存成 PDF",
     hint: "原图 · 可批注",
     note: "把图片包成单页 PDF 交给设备自己的导入接口。唯一同时做到「是原图、是文档、能用笔批注」的一种，而且不用 SSH、不用停设备界面。前提是设备上打开了「设置 › 通用 › 存储 › USB 网页界面」，并用 USB 线连接（地址 10.11.99.1）。",
+  },
+  {
+    id: "markdown",
+    title: "截图转笔记",
+    hint: "文字 · 笔重放",
+    note: "把截图交给 Gemini 转写成 markdown（标题、正文、列表、表格），再用笔一笔笔写上去——文字走矢量字体和印刷体中文描线，不是整页低分辨率描线，小字也能读。落到纸上的是「转写稿」，不是原图的样子。同样需要 GEMINI_API_KEY。",
+  },
+  {
+    id: "vector",
+    title: "轮廓描边",
+    hint: "图标 · 黑白",
+    note: "适合 logo、图标、纯色截图这类没有灰阶层次的图——描的是色块的轮廓边缘，不是骨架中线。填色区域用骨架描线只会找出一条没有意义的脊线；这个模式直接画出形状本身的边界。不识别灰阶或彩色渐变，只分黑白两色。",
   },
 ];
 type Probe = { ok: boolean; latency_ms: number; detail: string };

@@ -27,6 +27,9 @@ const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interac
 /// output, not a composition problem, and it sits in the middle of a drag and
 /// drop where seconds are felt.
 const MODEL: &str = "gemini-3.1-flash-image";
+/// The same reasoning, for the plain-text sibling `to_markdown` uses: a
+/// transcription job with a tightly specified output, not composition.
+const TEXT_MODEL: &str = "gemini-3.6-flash";
 
 /// The prompt, in rm-agent's manner: describe the machine the drawing is
 /// about to go through, then let the rules fall out of it.
@@ -82,6 +85,173 @@ margin line, signature or watermark. If the original contains lettering that has
 kept, write it as separated print letters, never joined script: connected letters are \
 the touching-ink case again, and a whole word merges into one blob."
     )
+}
+
+/// The prompt for `to_markdown`, in the same manner as `prompt()`: describe
+/// what happens to the answer afterwards, and let the constraints follow.
+///
+/// `rm::markdown::layout` walks a fixed set of block kinds — headings,
+/// paragraphs, bullet and ordered lists, tables, code blocks — and quietly
+/// drops anything else (blockquotes render as plain paragraphs, their
+/// content intact but the quoting lost; footnotes, definition lists and
+/// raw HTML vanish outright). Rather than let a construct outside that set
+/// silently disappear on the page, the prompt only offers the ones that
+/// are actually drawn.
+///
+/// Images get their own explicit refusal. `layout_image` only ever reads a
+/// *local file path* — deliberately, since this module draws what's on
+/// disk and doesn't reach onto the network to do it (see markdown.rs's
+/// module doc) — and a model has no way to name a path that exists on this
+/// machine. An `![alt](url)` in the answer wouldn't render broken, it
+/// would render as nothing, silently, so the prompt asks for it not to be
+/// there at all rather than hoped against.
+fn markdown_prompt() -> &'static str {
+    "Transcribe this screenshot as markdown that will be handwritten onto an e-ink \
+tablet, one block at a time, by real code — not read by a person, so there is no \
+value in decoration and real cost to anything it can't draw.\n\n\
+Use only: headings (#, ##, ###), plain paragraphs, bullet and numbered lists, \
+tables, and fenced code blocks. Bold and italic markers are accepted but rendered \
+identically to plain text, so don't rely on them to carry meaning. Do not emit \
+images, footnotes, definition lists, or raw HTML — none of them reach the page; an \
+image reference in particular can't work at all, because nothing here fetches a \
+URL or knows a path on your side, so it would silently vanish rather than draw as \
+a broken image. If the screenshot contains a picture with no meaningful text, say \
+so in one line rather than inventing a caption.\n\n\
+Keep tables to a handful of columns with short cell text — columns are drawn at \
+equal fixed width, so a long value in one cell doesn't make its column wider, it \
+wraps. Transcribe what is actually on the screen: real headings, real body text, \
+real table data. Don't add commentary, summaries, or content that isn't there. If \
+the page is long, prefer transcribing it completely over stopping early — a page \
+that doesn't fit is trimmed automatically, but content you never wrote can't be."
+}
+
+/// Ask the model to transcribe `image_path` as markdown — `Mode::Markdown`'s
+/// counterpart to `to_line_art`, text instead of a redrawn picture.
+pub fn to_markdown(image_path: &str) -> Result<String, String> {
+    let key = api_key()?;
+    let bytes = std::fs::read(image_path).map_err(|e| format!("读不了这张图：{e}"))?;
+    if bytes.is_empty() {
+        return Err("这张图是空的".into());
+    }
+
+    let body = serde_json::json!({
+        "model": TEXT_MODEL,
+        "input": [
+            { "type": "text", "text": markdown_prompt() },
+            { "type": "image", "mime_type": mime_of(image_path), "data": base64_encode(&bytes) }
+        ]
+    })
+    .to_string();
+
+    let dir = std::env::temp_dir();
+    let stem = format!("rmbin-gemini-md-{}", std::process::id());
+    let body_path = dir.join(format!("{stem}.json"));
+    let conf_path = dir.join(format!("{stem}.conf"));
+    let out_path = dir.join(format!("{stem}.out"));
+
+    let conf = format!(
+        "header = \"x-goog-api-key: {key}\"\n\
+         header = \"Content-Type: application/json\"\n\
+         url = \"{ENDPOINT}\"\n\
+         request = \"POST\"\n\
+         data = \"@{}\"\n\
+         output = \"{}\"\n\
+         silent\n\
+         show-error\n\
+         max-time = \"{TIMEOUT_SECS}\"\n",
+        body_path.display(),
+        out_path.display()
+    );
+
+    let cleanup = || {
+        for p in [&body_path, &conf_path, &out_path] {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+
+    write_private(&body_path, body.as_bytes()).map_err(|e| {
+        cleanup();
+        format!("无法写入请求：{e}")
+    })?;
+    if let Err(e) = write_private(&conf_path, conf.as_bytes()) {
+        cleanup();
+        return Err(format!("无法写入请求：{e}"));
+    }
+
+    let run = Command::new("curl")
+        .arg("--config")
+        .arg(&conf_path)
+        .output();
+    let out = match run {
+        Ok(o) => o,
+        Err(e) => {
+            cleanup();
+            return Err(format!("无法启动 curl：{e}"));
+        }
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        cleanup();
+        return Err(format!("Gemini 请求失败：{}", first_line(&err, "网络错误")));
+    }
+
+    let raw = std::fs::read(&out_path).unwrap_or_default();
+    let text = extract_text(&raw);
+    cleanup();
+    text
+}
+
+/// Find the transcribed text in the response — the `to_markdown` sibling of
+/// `extract_image`, same defensive tree-walk for the same reason: this
+/// endpoint's exact response shape isn't something to hard-code a path
+/// through.
+pub(crate) fn extract_text(raw: &[u8]) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_slice(raw).map_err(|_| {
+        let text = String::from_utf8_lossy(raw);
+        format!(
+            "Gemini 返回了无法解析的内容：{}",
+            first_line(&text, "空响应")
+        )
+    })?;
+
+    if let Some(msg) = json.pointer("/error/message").and_then(|v| v.as_str()) {
+        return Err(format!("Gemini 拒绝了请求：{msg}"));
+    }
+
+    let mut found = String::new();
+    find_text(&json, &mut found);
+    if found.trim().is_empty() {
+        return Err("Gemini 没有返回任何文字（可能是提示词被拒绝，或配额用尽）".into());
+    }
+    Ok(found)
+}
+
+/// Collect every `{"type": "text", "text": "..."}` item found anywhere in
+/// the tree, in document order, joined — mirrors the shape the request's
+/// own `input` array uses, on the assumption the response is symmetric
+/// with it; falls back to picking up a bare `"text"` string field if that
+/// assumption is wrong, rather than finding nothing at all.
+fn find_text(v: &serde_json::Value, out: &mut String) {
+    match v {
+        serde_json::Value::Object(map) => {
+            let type_is_text = map.get("type").and_then(|t| t.as_str()) == Some("text");
+            if let Some(t) = map.get("text").and_then(|t| t.as_str()) {
+                if type_is_text || !map.contains_key("type") {
+                    out.push_str(t);
+                    return; // matched — don't also recurse into this same string
+                }
+            }
+            for child in map.values() {
+                find_text(child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                find_text(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Long enough for a slow generation, short enough that a drop that is never
@@ -159,7 +329,10 @@ pub fn to_line_art(image_path: &str) -> Result<PathBuf, String> {
         return Err(format!("无法写入请求：{e}"));
     }
 
-    let run = Command::new("curl").arg("--config").arg(&conf_path).output();
+    let run = Command::new("curl")
+        .arg("--config")
+        .arg(&conf_path)
+        .output();
     let out = match run {
         Ok(o) => o,
         Err(e) => {
@@ -234,7 +407,13 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn mime_of(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
@@ -256,7 +435,10 @@ fn first_line<'a>(s: &'a str, fallback: &'a str) -> &'a str {
 pub(crate) fn extract_image(raw: &[u8]) -> Result<Vec<u8>, String> {
     let json: serde_json::Value = serde_json::from_slice(raw).map_err(|_| {
         let text = String::from_utf8_lossy(raw);
-        format!("Gemini 返回了无法解析的内容：{}", first_line(&text, "空响应"))
+        format!(
+            "Gemini 返回了无法解析的内容：{}",
+            first_line(&text, "空响应")
+        )
     })?;
 
     // An API error is a normal JSON body; say what it said rather than
@@ -317,7 +499,11 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         for i in 0..4 {
             if i <= chunk.len() {

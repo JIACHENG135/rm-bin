@@ -8,9 +8,18 @@
 
 use super::pdf;
 
+/// Unique per call, not just per process: two tests calling `png` with the
+/// same dimensions and colour otherwise collide on the same path — `cargo
+/// test` runs tests concurrently in one process, so `process::id()` alone
+/// doesn't tell them apart, and one thread's `remove_file`/`save` racing
+/// another's `image::open` reads a truncated file (an intermittent
+/// "unexpected end of file", not a real bug in what's under test).
 fn png(w: u32, h: u32, colour: bool) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let p = std::env::temp_dir().join(format!(
-        "rm-bin-pdf-{w}x{h}-{}-{}.png",
+        "rm-bin-pdf-{w}x{h}-{}-{}-{n}.png",
         colour,
         std::process::id()
     ));

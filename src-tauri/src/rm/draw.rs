@@ -46,7 +46,7 @@ pub(crate) const BASE_WORK: f64 = 1300.0;
 /// and `stroke_events` re-samples whatever it is handed at the digitizer's
 /// step — some five screen pixels — so the raw trace asks for five events
 /// where one will do.
-const EPSILON: f64 = 0.9;
+pub(crate) const EPSILON: f64 = 0.9;
 /// Where simplifying stops being free. Past about three pixels the corners of
 /// small glyphs start to round off, and by then it has stopped helping anyway:
 /// once every segment is longer than the digitizer's step, the event count is
@@ -56,7 +56,7 @@ const EPSILON_MAX: f64 = 3.0;
 /// Barbs of up to this many pixels hanging off a junction are skeletonizing
 /// artefacts rather than marks. Real short strokes — the dot of an "i", a 点 —
 /// don't touch a junction, and `prune_spurs` only cuts the ones that do.
-const MAX_SPUR: usize = 4;
+pub(crate) const MAX_SPUR: usize = 4;
 /// How far above its own resolution a source may be traced. See `page_fit`.
 const MAX_UPSCALE: f64 = 2.0;
 
@@ -84,7 +84,7 @@ const MAX_FILE_SAMPLES: usize = 120_000;
 /// edge it's docked to (~7.7% when that's a long edge), and the user can dock
 /// it to any of them; 10% clears it wherever it sits. `push`'s settle pause
 /// is the other half of this.
-const MARGIN: f64 = 0.10;
+pub(crate) const MARGIN: f64 = 0.10;
 /// Horizontal slices the drawing order is quantised to. Coarser bands mean
 /// longer left-to-right sweeps; finer ones mean the drawing marches down the
 /// page more strictly.
@@ -99,7 +99,7 @@ const PREVIEW_UNITS: u16 = 2000;
 /// long straight stroke down to the two points it deserves.
 const PREVIEW_EPSILON: f64 = 1.0 / 250.0;
 
-type Poly = Vec<(f64, f64)>;
+pub(crate) type Poly = Vec<(f64, f64)>;
 
 /// One stroke as the frontend needs it: points in the image's own frame,
 /// quantised to `PREVIEW_UNITS`.
@@ -271,28 +271,50 @@ fn simplify_all(raw: &[Poly], epsilon: f64) -> Vec<Poly> {
 /// digitizer events to be replayed.
 pub fn plan(image_path: &str, calib: &Calib) -> Result<Plan, String> {
     let (ordered, work_w, work_h) = trace_and_order(image_path, calib, MAX_PEN_SAMPLES)?;
-    let to_screen = placement(work_w, work_h, calib);
+    Ok(plan_from_page_strokes(&to_page_px(&ordered, work_w, work_h, calib), calib))
+}
 
+/// Build a `Plan` from strokes already placed at final size, in page
+/// pixels — origin top-left, x in `0..calib.screen_w`, y in
+/// `0..calib.screen_h`. `plan` gets here via `placement`, which maps its
+/// traced raster into this frame; `markdown` lays text and table lines out
+/// here directly and has no raster to place, so it calls this straight.
+pub fn plan_from_page_strokes(ordered: &[Poly], calib: &Calib) -> Plan {
     // Stroke events only — `push` frames the pen session around them, so
     // stroke 0 begins the moment the first ink lands rather than the moment
     // the pen starts hovering.
     let mut bytes = Vec::new();
     let mut stroke_ends = Vec::with_capacity(ordered.len());
     let mut preview = Vec::with_capacity(ordered.len());
-    for stroke in &ordered {
+    for stroke in ordered {
         let placed: Poly = stroke
             .iter()
-            .map(|&p| {
-                let (u, v) = to_screen(p);
-                calib.pen_from_screen(u, v)
-            })
+            .map(|&(x, y)| calib.pen_from_screen(x / calib.screen_w, y / calib.screen_h))
             .collect();
         bytes.extend_from_slice(&device::stroke_events(calib, std::slice::from_ref(&placed)));
         stroke_ends.push(bytes.len());
-        preview.push(to_preview(stroke, work_w, work_h));
+        preview.push(to_preview(stroke, calib.screen_w, calib.screen_h));
     }
+    Plan { bytes, stroke_ends, preview }
+}
 
-    Ok(Plan { bytes, stroke_ends, preview })
+/// Map traced-raster strokes into page-pixel coordinates via `placement`,
+/// the step `plan` and `page` used to do inline before each went on to
+/// build its own output shape. Pulled out so both — and `markdown`, which
+/// skips tracing but wants the same frame — start from the same place.
+fn to_page_px(ordered: &[Poly], work_w: f64, work_h: f64, calib: &Calib) -> Vec<Poly> {
+    let to_screen = placement(work_w, work_h, calib);
+    ordered
+        .iter()
+        .map(|s| {
+            s.iter()
+                .map(|&p| {
+                    let (u, v) = to_screen(p);
+                    (u * calib.screen_w, v * calib.screen_h)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// A traced image as a `.rm` page, plus the same strokes for the window.
@@ -312,28 +334,28 @@ pub struct Page {
 /// from the top, both in screen pixels) instead of pen digitizer units.
 pub fn page(image_path: &str, calib: &Calib) -> Result<Page, String> {
     let (ordered, work_w, work_h) = trace_and_order(image_path, calib, MAX_FILE_SAMPLES)?;
-    let to_screen = placement(work_w, work_h, calib);
-    Ok(Page {
+    Ok(page_from_page_strokes(&to_page_px(&ordered, work_w, work_h, calib), calib))
+}
+
+/// Build a `Page` from strokes already placed at final size, in page
+/// pixels — the `.rm`-file counterpart to `plan_from_page_strokes`. See
+/// there for why this exists as its own entry point.
+pub fn page_from_page_strokes(ordered: &[Poly], calib: &Calib) -> Page {
+    Page {
         strokes: ordered
             .iter()
             .map(|stroke| {
                 stroke
                     .iter()
-                    .map(|&p| {
-                        let (u, v) = to_screen(p);
-                        rmfile::Point {
-                            x: ((u - 0.5) * calib.screen_w) as f32,
-                            y: (v * calib.screen_h) as f32,
-                        }
+                    .map(|&(x, y)| rmfile::Point {
+                        x: (x - calib.screen_w / 2.0) as f32,
+                        y: y as f32,
                     })
                     .collect()
             })
             .collect(),
-        preview: ordered
-            .iter()
-            .map(|s| to_preview(s, work_w, work_h))
-            .collect(),
-    })
+        preview: ordered.iter().map(|s| to_preview(s, calib.screen_w, calib.screen_h)).collect(),
+    }
 }
 
 /// Quantised, simplified copy of a stroke in the image's own frame, for the

@@ -1,4 +1,7 @@
-mod rm;
+/// `pub` so the debug binaries under `src/bin/` — which link against this
+/// crate like any external consumer would — can reach `rm::markdown` and
+/// `rm::device` without duplicating them.
+pub mod rm;
 mod settings;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -40,6 +43,8 @@ async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<Strin
             settings::Mode::Screen => show_on_screen(&app, &cfg, &path),
             settings::Mode::Sketch => draw_sketch(&app, &cfg, &path),
             settings::Mode::Pdf => send_as_pdf(&app, &cfg, &path),
+            settings::Mode::Markdown => draw_markdown_note(&app, &cfg, &path),
+            settings::Mode::Vector => draw_vector(&app, &cfg, &path),
         };
         // The window's whole vocabulary for failure is a head-shake, which
         // says that something went wrong and nothing about what. Everything
@@ -205,6 +210,84 @@ fn keep_sketch(
     Ok(dest)
 }
 
+/// Transcribe the screenshot as markdown, then lay *that* out and ink it —
+/// `draw_sketch`'s counterpart for pages of text rather than pictures.
+///
+/// The window keeps showing the original screenshot until the transcription
+/// comes back, the same honesty `draw_sketch` practises: what lands on the
+/// page is a transcription, not the photo, and there is nothing truthful to
+/// ink before Gemini has actually produced it.
+fn draw_markdown_note(
+    app: &tauri::AppHandle,
+    cfg: &settings::Settings,
+    path: &str,
+) -> Result<String, String> {
+    let text = rm::gemini::to_markdown(path)?;
+
+    // Keep the transcription for the same reason `draw_sketch` keeps the
+    // redrawn line art: it's the only part of this mode a person can
+    // actually read back and judge, since what lands on the tablet is ink,
+    // not text. Kept per-drop, not overwritten, so a bad prompt tweak shows
+    // up as a diff against the last attempt rather than just disappearing.
+    let saved = match keep_markdown(app, path, &text) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("[rm-bin] could not file the transcription ({e})");
+            None
+        }
+    };
+    if let Some(p) = &saved {
+        eprintln!("[rm-bin] transcription saved: {}", p.display());
+    }
+
+    let calib = rm::device::detect(&cfg.host, cfg.port)?;
+    let plan = rm::markdown::plan(&text, &calib)?;
+    let (total, count) = (plan.bytes.len(), plan.stroke_count());
+
+    let _ = app.emit(PLAN_EVENT, &plan.preview);
+    let _ = app.emit(PROGRESS_EVENT, 0.0);
+
+    let step = count as f64 / PROGRESS_STEPS;
+    let mut last = 0.0f64;
+    let result = rm::device::push(&cfg.host, cfg.port, &calib, &plan.bytes, |written| {
+        let done = plan.strokes_done(written);
+        if done - last >= step {
+            last = done;
+            let _ = app.emit(PROGRESS_EVENT, done);
+        }
+    });
+    let _ = app.emit(PROGRESS_EVENT, count as f64);
+    result?;
+
+    Ok(format!(
+        "wrote {count} strokes ({total} bytes) from a {}-character transcription on {:?} at {}{}",
+        text.chars().count(),
+        calib.model,
+        cfg.host,
+        saved.map(|p| format!(", saved at {}", p.display())).unwrap_or_default()
+    ))
+}
+
+/// Move a transcription out of the temp directory into the app's own
+/// folder, named after the screenshot it came from and when — the
+/// `keep_sketch` of markdown text.
+fn keep_markdown(app: &tauri::AppHandle, original: &str, text: &str) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("transcripts");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let stem = std::path::Path::new(original)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".into());
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = dir.join(format!("{stem}-{secs}.md"));
+    std::fs::write(&dest, text).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
 /// Hand the tablet's own interface back, rather than waiting for the device's
 /// own timer.
 #[tauri::command]
@@ -248,6 +331,41 @@ fn draw_with_pen(
 
     Ok(format!(
         "drew {count} strokes ({total} bytes) on {:?} at {}",
+        calib.model, cfg.host
+    ))
+}
+
+/// `draw_with_pen`'s counterpart for `Mode::Vector`: same pen-replay
+/// machinery, a contour trace from `rm::vectorize` instead of a skeleton
+/// trace from `rm::draw` feeding it. See `vectorize.rs`'s module doc for
+/// why a flat graphic image wants a different tracer than a photograph
+/// does.
+fn draw_vector(
+    app: &tauri::AppHandle,
+    cfg: &settings::Settings,
+    path: &str,
+) -> Result<String, String> {
+    let calib = rm::device::detect(&cfg.host, cfg.port)?;
+    let plan = rm::vectorize::plan(path, &calib)?;
+    let (total, count) = (plan.bytes.len(), plan.stroke_count());
+
+    let _ = app.emit(PLAN_EVENT, &plan.preview);
+    let _ = app.emit(PROGRESS_EVENT, 0.0);
+
+    let step = count as f64 / PROGRESS_STEPS;
+    let mut last = 0.0f64;
+    let result = rm::device::push(&cfg.host, cfg.port, &calib, &plan.bytes, |written| {
+        let done = plan.strokes_done(written);
+        if done - last >= step {
+            last = done;
+            let _ = app.emit(PROGRESS_EVENT, done);
+        }
+    });
+    let _ = app.emit(PROGRESS_EVENT, count as f64);
+    result?;
+
+    Ok(format!(
+        "traced {count} contour strokes ({total} bytes) on {:?} at {}",
         calib.model, cfg.host
     ))
 }

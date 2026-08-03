@@ -45,12 +45,25 @@ const DEFAULT_PORT: u16 = 22;
 ///   importer. The only one that is the picture *and* a document *and*
 ///   writable — and the only one that needs no ssh, no key and no stopped
 ///   xochitl, just the USB web interface switched on.
+/// - `Markdown` is `Sketch`'s counterpart for pages of text rather than
+///   pictures: a photo goes to Gemini and comes back as markdown — a
+///   transcription, not a redrawing — which `rm::markdown` then lays out
+///   and inks itself, block by block, through the pen-replay path. What
+///   lands is what Gemini read off the page, reset in the tablet's own
+///   hand; it is not the photograph.
+/// - `Vector` traces contours instead of a centreline: right for a flat,
+///   graphic image — a logo, an icon, a screenshot of solid UI — where a
+///   filled region's *edge* is the shape, and `Pen`'s skeleton tracer would
+///   find only a meaningless spine through the middle of it. What lands is
+///   a silhouette of each region the threshold found, not a sketch of it.
 pub enum Mode {
     Pen,
     File,
     Screen,
     Sketch,
     Pdf,
+    Markdown,
+    Vector,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
