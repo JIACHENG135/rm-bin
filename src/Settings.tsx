@@ -3,9 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-const DEFAULTS = { host: "10.11.99.1", port: 22 };
+const DEFAULTS = { host: "10.11.99.1", port: 22, gemini_api_key: "" };
 
-type Config = { host: string; port: number };
+type Config = { host: string; port: number; gemini_api_key: string };
 
 type Probe = { ok: boolean; latency_ms: number; detail: string };
 type Status =
@@ -36,6 +36,7 @@ export default function Settings() {
   const [config, setConfig] = useState<Config>(DEFAULTS);
   const [host, setHost] = useState(DEFAULTS.host);
   const [port, setPort] = useState(String(DEFAULTS.port));
+  const [apiKey, setApiKey] = useState(DEFAULTS.gemini_api_key);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const probeSeq = useRef(0);
@@ -75,6 +76,7 @@ export default function Settings() {
       setConfig(c);
       setHost(c.host);
       setPort(String(c.port));
+      setApiKey(c.gemini_api_key ?? "");
       probe(c);
     })();
   }, [probe]);
@@ -109,14 +111,34 @@ export default function Settings() {
     setError(null);
   };
 
+  /* ————— gemini key: same instant-apply pattern, no probing to run ————— */
+  const commitApiKey = useCallback(async () => {
+    const next = apiKey.trim();
+    setApiKey(next);
+    if (next === config.gemini_api_key) return;
+
+    const merged = { ...config, gemini_api_key: next };
+    try {
+      const saved = IS_TAURI
+        ? await call<Config>("save_settings", { settings: merged })
+        : merged;
+      setConfig(saved);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [apiKey, config]);
+
   const restoreDefaults = async () => {
+    // Scoped to the device section only — resetting host/port is not a
+    // reason to silently throw away a Gemini key someone typed in.
     setHost(DEFAULTS.host);
     setPort(String(DEFAULTS.port));
     setError(null);
+    const next = { ...config, host: DEFAULTS.host, port: DEFAULTS.port };
     try {
       const saved = IS_TAURI
-        ? await call<Config>("save_settings", { settings: DEFAULTS })
-        : DEFAULTS;
+        ? await call<Config>("save_settings", { settings: next })
+        : next;
       setConfig(saved);
       probe(saved);
     } catch (e) {
@@ -126,6 +148,7 @@ export default function Settings() {
 
   const done = async () => {
     await commit();
+    await commitApiKey();
     if (!IS_TAURI) return;
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     getCurrentWindow().close();
@@ -244,6 +267,34 @@ export default function Settings() {
             : status.kind === "fail" && status.detail
             ? status.detail
             : "通过 USB 连接时地址固定为 10.11.99.1。使用 Wi-Fi 时，请在设备上打开「设置 › 通用 › 关于本机 › 版权与许可」查看 IP 地址。"}
+        </p>
+
+        <h2 className="group-title">自动命名与归类</h2>
+
+        <div className="group">
+          <div className="row">
+            <label className="row-label" htmlFor="gemini-key">
+              密钥
+            </label>
+            <input
+              id="gemini-key"
+              type="password"
+              className="field mono"
+              value={apiKey}
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              placeholder="Gemini API Key，留空关闭"
+              onChange={(e) => setApiKey(e.target.value)}
+              onBlur={commitApiKey}
+              onKeyDown={fieldKeys}
+            />
+          </div>
+        </div>
+
+        <p className="footnote">
+          填入 Google AI Studio 的 API key 后，落到设备文档库（仅经 ssh 传输时）的文件会由
+          Gemini 依据截图内容重新命名并分成文件夹；同名文件会自动加编号区分。留空则保持原文件名，不建文件夹。
         </p>
       </div>
 

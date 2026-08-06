@@ -13,6 +13,10 @@ pub mod rmfile;
 /// The image as a one-page PDF, posted to the tablet's own importer.
 pub mod pdf;
 
+/// Asking Gemini what a screenshot is, so the ssh fallback can name and file
+/// it instead of carrying the screenshot's own filename into the library.
+pub mod gemini;
+
 #[cfg(test)]
 #[path = "pdf_test.rs"]
 mod pdf_test;

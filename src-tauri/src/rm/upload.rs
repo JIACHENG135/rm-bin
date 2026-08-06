@@ -126,6 +126,112 @@ pub(crate) fn uuid() -> String {
     rmfile::uuid_string(&b)
 }
 
+/// One `.metadata` file already in the document store, as much of it as the
+/// folder/dedup logic needs.
+pub struct StoreEntry {
+    pub uuid: String,
+    pub parent: String,
+    pub visible_name: String,
+    pub is_collection: bool,
+}
+
+/// Read every `.metadata` file's `parent`/`visibleName`/`type` off the
+/// tablet, so a folder can be found or created without a second guess and a
+/// new document's name can be checked against its future siblings.
+///
+/// One ssh round trip for the whole store: metadata files are a few hundred
+/// bytes each and there are rarely more than a few hundred documents, so this
+/// is cheap next to the round trip itself. `\x01` — a byte JSON cannot
+/// contain unescaped inside a string — separates entries, so a `visibleName`
+/// is free to contain anything else.
+pub fn snapshot(host: &str, port: u16) -> Result<Vec<StoreEntry>, String> {
+    let script = format!(
+        "d={STORE}\n\
+         [ -d \"$d\" ] || {{ echo 'xochitl data directory missing'; exit 1; }}\n\
+         for f in \"$d\"/*.metadata; do [ -e \"$f\" ] || continue; \
+         printf '\\001%s\\n' \"$(basename \"$f\" .metadata)\"; cat \"$f\"; done\n"
+    );
+
+    let out = crate::rm::device::ssh_base(host, port)
+        .arg(script)
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("无法启动 ssh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "读取文档库失败：{}",
+            crate::rm::device::remote_error(&out.stderr)
+        ));
+    }
+    Ok(parse_snapshot(&String::from_utf8_lossy(&out.stdout)))
+}
+
+pub(crate) fn parse_snapshot(text: &str) -> Vec<StoreEntry> {
+    text.split('\u{1}')
+        .skip(1) // everything before the first marker is empty
+        .filter_map(|block| {
+            let (uuid, json) = block.split_once('\n')?;
+            let v: serde_json::Value = serde_json::from_str(json).ok()?;
+            Some(StoreEntry {
+                uuid: uuid.trim().to_string(),
+                parent: v.get("parent").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                visible_name: v.get("visibleName").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                is_collection: v.get("type").and_then(|t| t.as_str()) == Some("CollectionType"),
+            })
+        })
+        .collect()
+}
+
+/// The top-level folder names, sorted, for showing Gemini what it can reuse.
+///
+/// Exactly the set [`resolve_folder`] will match against, which is the point:
+/// offering a name it cannot then resolve — a nested folder, or one in the
+/// trash — would produce a suggestion that silently creates a duplicate at the
+/// root instead of reusing what the user was looking at.
+pub fn top_level_folders(snapshot: &[StoreEntry]) -> Vec<String> {
+    let mut names: Vec<String> = snapshot
+        .iter()
+        .filter(|e| e.is_collection && e.parent.is_empty() && !e.visible_name.trim().is_empty())
+        .map(|e| e.visible_name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Find the uuid of the top-level folder named `folder`, or hand back a
+/// freshly minted one plus the `.metadata` entry that creates it — the
+/// caller writes that entry alongside the document in the same ssh session,
+/// so the folder never exists without something in it.
+pub fn resolve_folder(snapshot: &[StoreEntry], folder: &str, now_ms: u128) -> (String, Option<Entry>) {
+    if let Some(existing) = snapshot
+        .iter()
+        .find(|e| e.is_collection && e.parent.is_empty() && e.visible_name == folder)
+    {
+        return (existing.uuid.clone(), None);
+    }
+    let id = uuid();
+    let entry = Entry {
+        name: format!("{id}.metadata"),
+        bytes: crate::rm::rmfile::collection_metadata(folder, now_ms).into_bytes(),
+    };
+    (id, Some(entry))
+}
+
+/// `name`, or `name (2)`, `name (3)`, ... — whichever is the first not
+/// already used by a sibling of `parent`.
+pub fn dedupe_name(snapshot: &[StoreEntry], parent: &str, name: &str) -> String {
+    let taken: std::collections::HashSet<&str> = snapshot
+        .iter()
+        .filter(|e| e.parent == parent)
+        .map(|e| e.visible_name.as_str())
+        .collect();
+    if !taken.contains(name) {
+        return name.to_string();
+    }
+    (2..).map(|n| format!("{name} ({n})")).find(|c| !taken.contains(c.as_str())).unwrap()
+}
+
 /// A document name from the dropped file: the image's own name, since that is
 /// what the person will look for in the document list.
 pub fn name_from_path(path: &str) -> String {

@@ -160,7 +160,9 @@ fn assemble(jpeg: &[u8], w: u32, h: u32, color_space: &str, pw: f64, ph: f64) ->
 /// whether the tablet's interface restarted underneath the user.
 pub enum Delivered {
     WebInterface,
-    Ssh,
+    /// Carries the name the document actually landed under, since the ssh
+    /// path may have renamed it away from `name` on Gemini's suggestion.
+    Ssh { name: String },
 }
 
 /// Get the PDF onto the tablet, by whichever route is open.
@@ -176,7 +178,21 @@ pub enum Delivered {
 /// interface is tried first rather than configured, because "is it reachable"
 /// is a question with a fast, definitive answer and no setting can be as
 /// accurate as asking.
-pub fn deliver(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<Delivered, String> {
+///
+/// `image_path` and `api_key` exist only for the ssh branch: Gemini is asked
+/// what the screenshot is, and the reply used to name and file the document,
+/// only once the web interface has already been ruled out. The web interface
+/// has no folder to place a document into, so trying Gemini ahead of it would
+/// be a network call — and, for anyone paying per request, a cost — spent on
+/// a suggestion the successful path can't use.
+pub fn deliver(
+    host: &str,
+    port: u16,
+    name: &str,
+    pdf: &[u8],
+    image_path: &str,
+    api_key: &str,
+) -> Result<Delivered, String> {
     let mut web_err = String::new();
     for candidate in web_hosts(host) {
         match upload(&candidate, name, pdf) {
@@ -184,8 +200,8 @@ pub fn deliver(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<Delivere
             Err(e) => web_err = e,
         }
     }
-    match install_over_ssh(host, port, name, pdf) {
-        Ok(()) => Ok(Delivered::Ssh),
+    match install_over_ssh(host, port, name, pdf, image_path, api_key) {
+        Ok(final_name) => Ok(Delivered::Ssh { name: final_name }),
         // Report both: one of them is the reason, and which one depends on a
         // setup detail only the person in front of the tablet knows.
         Err(ssh_err) => Err(format!("{ssh_err}\n（网页接口也不通：{web_err}）")),
@@ -214,7 +230,14 @@ pub(crate) fn web_hosts(host: &str) -> Vec<String> {
 /// notebook's, minus the page: a `.metadata` naming it and a `.content`
 /// saying it is a PDF. Everything else — page ids, thumbnails — xochitl
 /// generates for itself on the next start.
-fn install_over_ssh(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<(), String> {
+fn install_over_ssh(
+    host: &str,
+    port: u16,
+    name: &str,
+    pdf: &[u8],
+    image_path: &str,
+    api_key: &str,
+) -> Result<String, String> {
     use crate::rm::upload::{install_files, Entry};
 
     let now_ms = std::time::SystemTime::now()
@@ -223,22 +246,69 @@ fn install_over_ssh(host: &str, port: u16, name: &str, pdf: &[u8]) -> Result<(),
         .unwrap_or(0);
     let doc = crate::rm::upload::uuid();
 
-    install_files(
-        host,
-        port,
-        &[
-            Entry {
-                name: format!("{doc}.metadata"),
-                bytes: crate::rm::rmfile::metadata(name, now_ms).into_bytes(),
-            },
-            Entry {
-                name: format!("{doc}.content"),
-                bytes: content(pdf.len()).into_bytes(),
-            },
-            Entry { name: format!("{doc}.pdf"), bytes: pdf.to_vec() },
-        ],
-        &[],
-    )
+    // Unfiled by default — exactly what shipped before Gemini existed here.
+    // Only a configured key, a reachable Gemini, *and* a store listing that
+    // succeeds earn the document a folder; any failure along the way falls
+    // back to this rather than blocking the upload on an API call.
+    let mut parent = String::new();
+    let mut visible_name = name.to_string();
+    let mut extra_entries: Vec<Entry> = Vec::new();
+
+    if !api_key.trim().is_empty() {
+        // The library is listed *before* Gemini is asked, not after. The
+        // folders already in it are the single most useful thing the model can
+        // be told: asked cold, it answers each upload as a fresh question and
+        // the answers drift across synonyms, so a library ends up with
+        // 编程题目 next to 编程题解 next to 算法题 holding one document each.
+        // The listing was already being fetched on this path — it just used to
+        // happen too late to inform the answer.
+        let snap = match crate::rm::upload::snapshot(host, port) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("[rm-bin] 无法读取文档库，这次不归类，只让 Gemini 命名：{e}");
+                None
+            }
+        };
+        let folders = snap
+            .as_deref()
+            .map(crate::rm::upload::top_level_folders)
+            .unwrap_or_default();
+
+        let suggestion = crate::rm::gemini::suggest(image_path, api_key, name, &folders);
+
+        match (&snap, suggestion.folder.is_empty()) {
+            // A folder to file it under, and a library to look it up in.
+            (Some(snap), false) => {
+                let (folder_uuid, new_folder) =
+                    crate::rm::upload::resolve_folder(snap, &suggestion.folder, now_ms);
+                if let Some(entry) = new_folder {
+                    extra_entries.push(entry);
+                }
+                visible_name = crate::rm::upload::dedupe_name(snap, &folder_uuid, &suggestion.name);
+                parent = folder_uuid;
+            }
+            // Either Gemini declined to file it, or the listing failed and
+            // there is nothing to resolve a folder against. Keep the name it
+            // suggested — that half needs no library — and leave it unfiled.
+            _ => visible_name = suggestion.name,
+        }
+    }
+
+    let mut entries = vec![
+        Entry {
+            name: format!("{doc}.metadata"),
+            bytes: crate::rm::rmfile::metadata(&visible_name, now_ms, &parent).into_bytes(),
+        },
+        Entry {
+            name: format!("{doc}.content"),
+            bytes: content(pdf.len()).into_bytes(),
+        },
+        Entry { name: format!("{doc}.pdf"), bytes: pdf.to_vec() },
+    ];
+    entries.extend(extra_entries);
+
+    install_files(host, port, &entries, &[])?;
+    Ok(visible_name)
 }
 
 /// The `.content` for an imported PDF.

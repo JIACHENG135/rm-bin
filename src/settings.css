@@ -75,7 +75,8 @@ body {
 .content {
   flex: 1;
   padding: 18px 20px 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* ————— group ————— */
@@ -83,7 +84,10 @@ body {
   font-size: 13px;
   font-weight: 590; /* SF's semibold-ish */
   letter-spacing: -0.005em;
-  margin: 0 0 7px 2px;
+  margin: 14px 0 7px 2px;
+}
+.group-title:first-child {
+  margin-top: 0;
 }
 
 .group {

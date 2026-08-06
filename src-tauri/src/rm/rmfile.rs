@@ -5,7 +5,9 @@
 //! cut down to PDF-only, leaving just the notebook metadata JSON and the
 //! uuid formatter `pdf.rs`'s ssh-fallback path still uses.
 
-pub fn metadata(name: &str, now_ms: u128) -> String {
+/// `parent` is either empty (unfiled, at the document library's root) or the
+/// uuid of a collection written by [`collection_metadata`].
+pub fn metadata(name: &str, now_ms: u128, parent: &str) -> String {
     format!(
         r#"{{
     "createdTime": "{now_ms}",
@@ -13,10 +15,27 @@ pub fn metadata(name: &str, now_ms: u128) -> String {
     "lastOpened": "{now_ms}",
     "lastOpenedPage": 0,
     "new": false,
-    "parent": "",
+    "parent": "{parent}",
     "pinned": false,
     "source": "",
     "type": "DocumentType",
+    "visibleName": "{name}"
+}}
+"#
+    )
+}
+
+/// The `.metadata` for a folder ("collection", in xochitl's own terms).
+/// Nested one level deep only — `parent` is always the library root — which
+/// is all the automatic categorization needs.
+pub fn collection_metadata(name: &str, now_ms: u128) -> String {
+    format!(
+        r#"{{
+    "createdTime": "{now_ms}",
+    "lastModified": "{now_ms}",
+    "parent": "",
+    "pinned": false,
+    "type": "CollectionType",
     "visibleName": "{name}"
 }}
 "#

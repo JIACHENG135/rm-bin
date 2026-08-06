@@ -22,6 +22,14 @@ pub struct Settings {
     pub host: String,
     /// SSH port — 22 unless the user tunnels.
     pub port: u16,
+    /// Google AI Studio key. Empty means the feature is off: the document
+    /// keeps the dropped file's own name and lands unfiled, exactly as
+    /// before this existed.
+    ///
+    /// Only the ssh fallback path can use it — the web interface has no
+    /// folder concept to place a document into, so it keeps sending the
+    /// plain filename regardless of this setting.
+    pub gemini_api_key: String,
 }
 
 impl Default for Settings {
@@ -29,6 +37,7 @@ impl Default for Settings {
         Self {
             host: DEFAULT_HOST.into(),
             port: DEFAULT_PORT,
+            gemini_api_key: String::new(),
         }
     }
 }
@@ -61,6 +70,7 @@ fn write_settings(path: &std::path::Path, settings: &Settings) -> Result<Setting
         } else {
             settings.port
         },
+        gemini_api_key: settings.gemini_api_key.trim().to_string(),
     };
 
     let body = serde_json::to_vec_pretty(&clean).map_err(|e| e.to_string())?;
@@ -257,7 +267,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("RM Bin 设置")
-            .inner_size(460.0, 330.0)
+            .inner_size(460.0, 480.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
@@ -300,11 +310,13 @@ mod tests {
             &Settings {
                 host: "  192.168.1.42 ".into(),
                 port: 0,
+                gemini_api_key: "  abc123  ".into(),
             },
         )
         .unwrap();
         assert_eq!(saved.host, "192.168.1.42");
         assert_eq!(saved.port, DEFAULT_PORT); // 0 means "unset"
+        assert_eq!(saved.gemini_api_key, "abc123");
 
         let loaded = read_settings(&p);
         assert_eq!(loaded.host, "192.168.1.42");
@@ -318,6 +330,7 @@ mod tests {
             &Settings {
                 host: "   ".into(),
                 port: 22,
+                gemini_api_key: String::new(),
             }
         )
         .is_err());

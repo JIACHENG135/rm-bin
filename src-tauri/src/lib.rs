@@ -52,15 +52,17 @@ fn send_as_pdf(
 
     let name = rm::upload::name_from_path(path);
     let size = pdf.len();
-    let how = rm::pdf::deliver(&cfg.host, cfg.port, &name, &pdf)?;
+    let how = rm::pdf::deliver(&cfg.host, cfg.port, &name, &pdf, path, &cfg.gemini_api_key)?;
     let _ = app.emit(PROGRESS_EVENT, 1.0);
 
-    let route = match how {
-        rm::pdf::Delivered::WebInterface => "the web interface",
-        rm::pdf::Delivered::Ssh => "ssh (xochitl restarted)",
+    // The ssh path may have renamed the document on Gemini's suggestion —
+    // report the name it actually landed under, not the one it was offered.
+    let (final_name, route) = match how {
+        rm::pdf::Delivered::WebInterface => (name, "the web interface"),
+        rm::pdf::Delivered::Ssh { name } => (name, "ssh (xochitl restarted)"),
     };
     Ok(format!(
-        "uploaded \"{name}.pdf\" ({size} bytes) to {} via {route}",
+        "uploaded \"{final_name}.pdf\" ({size} bytes) to {} via {route}",
         cfg.host
     ))
 }
