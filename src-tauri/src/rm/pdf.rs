@@ -156,52 +156,74 @@ fn assemble(jpeg: &[u8], w: u32, h: u32, color_space: &str, pw: f64, ph: f64) ->
     out
 }
 
-/// How the document got there — worth reporting, because the two differ in
-/// whether the tablet's interface restarted underneath the user.
-pub enum Delivered {
-    WebInterface,
-    /// Carries the name the document actually landed under, since the ssh
-    /// path may have renamed it away from `name` on Gemini's suggestion.
-    Ssh { name: String },
+/// One image on its way to the tablet: the page already rendered, plus what
+/// the naming step needs if it runs.
+pub struct Item {
+    pub image_path: String,
+    /// The name to use if Gemini is off or fails — the dropped file's own.
+    pub fallback_name: String,
+    pub pdf: Vec<u8>,
 }
 
-/// Get the PDF onto the tablet, by whichever route is open.
+/// Where an item actually landed, for reporting back.
+pub struct Placed {
+    pub name: String,
+    /// Visible folder name; empty when the document is unfiled.
+    pub folder: String,
+}
+
+/// How the documents got there — worth reporting, because the two differ in
+/// whether the tablet's interface restarted underneath the user.
+pub enum Route {
+    WebInterface,
+    Ssh,
+}
+
+pub struct Delivery {
+    pub placed: Vec<Placed>,
+    pub route: Route,
+}
+
+/// Get a batch of PDFs onto the tablet, by whichever route is open.
 ///
 /// The web interface is the better one — it is the tablet's own importer, so
-/// nothing restarts and the document simply appears — but it is off by
+/// nothing restarts and the documents simply appear — but it is off by
 /// default and, when on, listens only on the USB address. On a tablet that
 /// lives on wifi with no cable there is no port 80 at all, which is exactly
 /// what the first version of this ran into.
 ///
-/// So: try it, and fall back to placing the file in the document store over
-/// ssh, which works anywhere ssh does and costs an xochitl restart. The web
-/// interface is tried first rather than configured, because "is it reachable"
-/// is a question with a fast, definitive answer and no setting can be as
-/// accurate as asking.
+/// So: try it, and fall back to placing the files in the document store over
+/// ssh, which works anywhere ssh does and costs one xochitl restart — one for
+/// the whole batch, which is the reason batching exists at all.
 ///
-/// `image_path` and `api_key` exist only for the ssh branch: Gemini is asked
-/// what the screenshot is, and the reply used to name and file the document,
-/// only once the web interface has already been ruled out. The web interface
-/// has no folder to place a document into, so trying Gemini ahead of it would
-/// be a network call — and, for anyone paying per request, a cost — spent on
-/// a suggestion the successful path can't use.
-pub fn deliver(
-    host: &str,
-    port: u16,
-    name: &str,
-    pdf: &[u8],
-    image_path: &str,
-    api_key: &str,
-) -> Result<Delivered, String> {
-    let mut web_err = String::new();
+/// Reachability is settled *before* the first upload rather than discovered
+/// by one failing. A batch that got three documents in over HTTP and then
+/// fell back to ssh would send those three a second time, so the choice of
+/// route has to be made once, for all of them, while nothing has been sent.
+pub fn deliver(host: &str, port: u16, items: &[Item], api_key: &str) -> Result<Delivery, String> {
+    let mut web_err = String::from("没有可用的网页接口地址");
     for candidate in web_hosts(host) {
-        match upload(&candidate, name, pdf) {
-            Ok(()) => return Ok(Delivered::WebInterface),
+        match web_reachable(&candidate) {
             Err(e) => web_err = e,
+            // Committed: from here a failure is reported rather than retried
+            // over ssh, because some of the batch may already have landed.
+            Ok(()) => {
+                let mut placed = Vec::with_capacity(items.len());
+                for item in items {
+                    upload(&candidate, &item.fallback_name, &item.pdf)?;
+                    // The web interface has no folder concept, so every
+                    // document lands unfiled under its own filename.
+                    placed.push(Placed {
+                        name: item.fallback_name.clone(),
+                        folder: String::new(),
+                    });
+                }
+                return Ok(Delivery { placed, route: Route::WebInterface });
+            }
         }
     }
-    match install_over_ssh(host, port, name, pdf, image_path, api_key) {
-        Ok(final_name) => Ok(Delivered::Ssh { name: final_name }),
+    match install_batch_over_ssh(host, port, items, api_key) {
+        Ok(placed) => Ok(Delivery { placed, route: Route::Ssh }),
         // Report both: one of them is the reason, and which one depends on a
         // setup detail only the person in front of the tablet knows.
         Err(ssh_err) => Err(format!("{ssh_err}\n（网页接口也不通：{web_err}）")),
@@ -224,91 +246,167 @@ pub(crate) fn web_hosts(host: &str) -> Vec<String> {
     }
 }
 
-/// Place the PDF in xochitl's document store and restart it.
+/// Where one document ended up, plus the folder that had to be created for
+/// it, if any.
+pub(crate) struct Placement {
+    pub parent: String,
+    pub visible_name: String,
+    pub new_folder: Option<crate::rm::upload::Entry>,
+}
+
+/// Decide where one document goes, and write the decision back into `snap` so
+/// the rest of the batch can see it.
+///
+/// That write-back is the whole point, and it is what a per-document upload
+/// never had to think about. Two screenshots in one batch that belong in the
+/// same not-yet-existing folder would each resolve against the original
+/// listing, each fail to find it, and each mint a folder — leaving two
+/// identically named folders side by side, which is the exact duplication
+/// batching was supposed to end. Recording the folder as though it were
+/// already on the tablet makes the second one reuse the first's.
+///
+/// The document itself is recorded for the same reason one step down: two
+/// screenshots of the same thing must become "X" and "X (2)", and
+/// `dedupe_name` can only see that if the first is already in the list.
+pub(crate) fn place(
+    snap: &mut Vec<crate::rm::upload::StoreEntry>,
+    doc: &str,
+    folder: &str,
+    name: &str,
+    now_ms: u128,
+) -> Placement {
+    use crate::rm::upload::StoreEntry;
+
+    let (parent, new_folder) = crate::rm::upload::resolve_folder(snap, folder, now_ms);
+    if new_folder.is_some() {
+        snap.push(StoreEntry {
+            uuid: parent.clone(),
+            parent: String::new(),
+            visible_name: folder.to_string(),
+            is_collection: true,
+        });
+    }
+
+    let visible_name = crate::rm::upload::dedupe_name(snap, &parent, name);
+    snap.push(StoreEntry {
+        uuid: doc.to_string(),
+        parent: parent.clone(),
+        visible_name: visible_name.clone(),
+        is_collection: false,
+    });
+
+    Placement { parent, visible_name, new_folder }
+}
+
+/// Place every PDF in the batch into xochitl's document store, and restart it
+/// once at the end.
 ///
 /// The wrapper xochitl needs around an imported PDF is the same shape as a
 /// notebook's, minus the page: a `.metadata` naming it and a `.content`
 /// saying it is a PDF. Everything else — page ids, thumbnails — xochitl
 /// generates for itself on the next start.
-fn install_over_ssh(
+///
+/// The restart is the whole reason this takes a slice. xochitl holds the
+/// document list in memory, so a file appearing underneath it goes unnoticed
+/// until it starts again; one restart per dropped image is what made dropping
+/// a handful of them unpleasant. `install_files` already writes any number of
+/// files down a single ssh session and restarts only after the last one, so
+/// batching is the shape it was built for — it was just being handed one
+/// document at a time.
+fn install_batch_over_ssh(
     host: &str,
     port: u16,
-    name: &str,
-    pdf: &[u8],
-    image_path: &str,
+    items: &[Item],
     api_key: &str,
-) -> Result<String, String> {
-    use crate::rm::upload::{install_files, Entry};
+) -> Result<Vec<Placed>, String> {
+    use crate::rm::upload::{install_files, Entry, StoreEntry};
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let doc = crate::rm::upload::uuid();
 
-    // Unfiled by default — exactly what shipped before Gemini existed here.
-    // Only a configured key, a reachable Gemini, *and* a store listing that
-    // succeeds earn the document a folder; any failure along the way falls
-    // back to this rather than blocking the upload on an API call.
-    let mut parent = String::new();
-    let mut visible_name = name.to_string();
-    let mut extra_entries: Vec<Entry> = Vec::new();
-
-    if !api_key.trim().is_empty() {
-        // The library is listed *before* Gemini is asked, not after. The
-        // folders already in it are the single most useful thing the model can
-        // be told: asked cold, it answers each upload as a fresh question and
-        // the answers drift across synonyms, so a library ends up with
-        // 编程题目 next to 编程题解 next to 算法题 holding one document each.
-        // The listing was already being fetched on this path — it just used to
-        // happen too late to inform the answer.
-        let snap = match crate::rm::upload::snapshot(host, port) {
+    // One listing for the whole batch, taken before any naming. It is then
+    // kept up to date locally as each item is placed — see below.
+    let mut snap: Option<Vec<StoreEntry>> = if api_key.trim().is_empty() {
+        None
+    } else {
+        match crate::rm::upload::snapshot(host, port) {
             Ok(s) => Some(s),
             Err(e) => {
-                eprintln!("[rm-bin] 无法读取文档库，这次不归类，只让 Gemini 命名：{e}");
+                eprintln!("[rm-bin] 无法读取文档库，这批不归类，只让 Gemini 命名：{e}");
                 None
             }
-        };
-        let folders = snap
-            .as_deref()
-            .map(crate::rm::upload::top_level_folders)
-            .unwrap_or_default();
-
-        let suggestion = crate::rm::gemini::suggest(image_path, api_key, name, &folders);
-
-        match (&snap, suggestion.folder.is_empty()) {
-            // A folder to file it under, and a library to look it up in.
-            (Some(snap), false) => {
-                let (folder_uuid, new_folder) =
-                    crate::rm::upload::resolve_folder(snap, &suggestion.folder, now_ms);
-                if let Some(entry) = new_folder {
-                    extra_entries.push(entry);
-                }
-                visible_name = crate::rm::upload::dedupe_name(snap, &folder_uuid, &suggestion.name);
-                parent = folder_uuid;
-            }
-            // Either Gemini declined to file it, or the listing failed and
-            // there is nothing to resolve a folder against. Keep the name it
-            // suggested — that half needs no library — and leave it unfiled.
-            _ => visible_name = suggestion.name,
         }
-    }
+    };
 
-    let mut entries = vec![
-        Entry {
+    let mut entries: Vec<Entry> = Vec::with_capacity(items.len() * 3);
+    let mut placed: Vec<Placed> = Vec::with_capacity(items.len());
+
+    for item in items {
+        let doc = crate::rm::upload::uuid();
+
+        // Unfiled by default — exactly what shipped before Gemini existed
+        // here. Only a configured key, a reachable Gemini, *and* a store
+        // listing that succeeds earn a document a folder; any failure along
+        // the way falls back to this rather than blocking the upload.
+        let mut parent = String::new();
+        let mut visible_name = item.fallback_name.clone();
+        let mut folder_name = String::new();
+
+        if !api_key.trim().is_empty() {
+            // The library is listed *before* Gemini is asked, not after. The
+            // folders already in it are the single most useful thing the model
+            // can be told: asked cold, it answers each upload as a fresh
+            // question and the answers drift across synonyms, so a library
+            // ends up with 编程题目 next to 编程题解 next to 算法题 holding one
+            // document each.
+            let folders = snap
+                .as_deref()
+                .map(crate::rm::upload::top_level_folders)
+                .unwrap_or_default();
+
+            let suggestion = crate::rm::gemini::suggest(
+                &item.image_path,
+                api_key,
+                &item.fallback_name,
+                &folders,
+            );
+
+            match (snap.as_mut(), suggestion.folder.is_empty()) {
+                // A folder to file it under, and a library to look it up in.
+                (Some(snap), false) => {
+                    let p = place(snap, &doc, &suggestion.folder, &suggestion.name, now_ms);
+                    if let Some(entry) = p.new_folder {
+                        entries.push(entry);
+                    }
+                    visible_name = p.visible_name;
+                    folder_name = suggestion.folder;
+                    parent = p.parent;
+                }
+                // Either Gemini declined to file it, or the listing failed and
+                // there is nothing to resolve a folder against. Keep the name
+                // it suggested — that half needs no library — and leave it
+                // unfiled.
+                _ => visible_name = suggestion.name,
+            }
+        }
+
+        entries.push(Entry {
             name: format!("{doc}.metadata"),
             bytes: crate::rm::rmfile::metadata(&visible_name, now_ms, &parent).into_bytes(),
-        },
-        Entry {
+        });
+        entries.push(Entry {
             name: format!("{doc}.content"),
-            bytes: content(pdf.len()).into_bytes(),
-        },
-        Entry { name: format!("{doc}.pdf"), bytes: pdf.to_vec() },
-    ];
-    entries.extend(extra_entries);
+            bytes: content(item.pdf.len()).into_bytes(),
+        });
+        entries.push(Entry { name: format!("{doc}.pdf"), bytes: item.pdf.clone() });
+
+        placed.push(Placed { name: visible_name, folder: folder_name });
+    }
 
     install_files(host, port, &entries, &[])?;
-    Ok(visible_name)
+    Ok(placed)
 }
 
 /// The `.content` for an imported PDF.
@@ -339,11 +437,15 @@ pub(crate) fn content(size: usize) -> String {
 /// `curl` again, for multipart: hand-rolling a form body to save a
 /// subprocess, in an app that already spawns `ssh` for everything else, would
 /// be effort spent in the wrong place.
-pub fn upload(host: &str, name: &str, pdf: &[u8]) -> Result<(), String> {
-    // The endpoint uploads "to the last folder that was listed" — it is
-    // stateful, and a POST with no listing before it has no defined
-    // destination. So ask for the root folder first, which both fixes the
-    // target and is a cheap way to find out whether anything is there at all.
+/// Ask the web interface for the root folder listing.
+///
+/// Two jobs in one request. It answers "is the interface there at all",
+/// which is how [`deliver`] picks a route before committing the batch; and
+/// because the upload endpoint is stateful — it posts "to the last folder
+/// that was listed" — it also fixes the destination at the library root.
+/// Every upload needs that second half, so this runs once per document
+/// rather than once per batch.
+pub(crate) fn web_reachable(host: &str) -> Result<(), String> {
     let base = format!("http://{host}");
     let probe = Command::new("curl")
         // Short: this runs on a host that is usually not there, and the whole
@@ -357,6 +459,12 @@ pub fn upload(host: &str, name: &str, pdf: &[u8]) -> Result<(), String> {
         let err = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
         return Err(format!("网页接口不可达（{base}）：{err}"));
     }
+    Ok(())
+}
+
+pub fn upload(host: &str, name: &str, pdf: &[u8]) -> Result<(), String> {
+    web_reachable(host)?;
+    let base = format!("http://{host}");
 
     let path = std::env::temp_dir().join(format!("{name}.pdf"));
     std::fs::write(&path, pdf).map_err(|e| format!("无法写入临时文件：{e}"))?;

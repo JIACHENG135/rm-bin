@@ -234,9 +234,45 @@ fn apply_glass(window: &tauri::WebviewWindow) {
 
 /// Right-clicking the bin pops a real NSMenu — the system draws it, so the
 /// floating sheet itself needs no chrome of its own.
+///
+/// It is also where the queue keeps the two things the window itself will not
+/// say: how long the oldest sheet has been waiting — stated only to someone
+/// who came looking for it — and "clear everything", which is the one
+/// irreversible act here and so is the one that never gets a gesture.
 #[tauri::command]
 pub fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String> {
     use tauri::menu::{ContextMenu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+    let pending = crate::pending::len();
+
+    let mut builder = MenuBuilder::new(&app);
+
+    if pending > 0 {
+        if let Some(age) = crate::pending::age_label() {
+            // Not a command — the only way the queue ever mentions how long it
+            // has been waiting, and only to someone who came looking.
+            let stamp = MenuItemBuilder::new(format!("最早：{age}"))
+                .id("queue-age")
+                .enabled(false)
+                .build(&app)
+                .map_err(|e| e.to_string())?;
+            builder = builder.item(&stamp);
+        }
+
+        // Tearing one sheet out is a gesture and is undoable; tearing them all
+        // out is neither, so it gets the second step. A submenu is that step —
+        // system-drawn, dismissable by moving the mouse away, and it costs no
+        // dialog.
+        let confirm = MenuItemBuilder::new(format!("确认清空 {pending} 张"))
+            .id("queue-clear")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let clear = tauri::menu::SubmenuBuilder::new(&app, "全部清空…")
+            .item(&confirm)
+            .build()
+            .map_err(|e| e.to_string())?;
+        builder = builder.separator().item(&clear);
+    }
 
     let settings = MenuItemBuilder::new("设置…")
         .id("open-settings")
@@ -244,7 +280,8 @@ pub fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), St
         .build(&app)
         .map_err(|e| e.to_string())?;
     let quit = PredefinedMenuItem::quit(&app, Some("退出 RM Bin")).map_err(|e| e.to_string())?;
-    let menu = MenuBuilder::new(&app)
+    let menu = builder
+        .separator()
         .item(&settings)
         .separator()
         .item(&quit)

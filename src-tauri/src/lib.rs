@@ -2,70 +2,17 @@
 /// crate like any external consumer would — can reach `rm::pdf` and
 /// `rm::device` without duplicating them.
 pub mod rm;
+
+/// What has been dropped in but not yet sent — the whole point of the app
+/// since a drop stopped meaning a send.
+pub mod pending;
+
+/// The window itself: one fixed size, and which part of it catches the pointer.
+mod chrome;
 mod settings;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::{Emitter, Manager};
-
-/// No strokes to trace, so the window has nothing to ink — it holds the
-/// dropped photo and fades it as the upload lands, which `PROGRESS_EVENT`
-/// drives. `PLAN_EVENT` is emitted once, empty, just to tell the frontend
-/// there's no line work coming.
-const PLAN_EVENT: &str = "draw-plan";
-const PROGRESS_EVENT: &str = "draw-progress";
-
-/// Wrap the image in a one-page PDF and hand it to the tablet's importer.
-#[tauri::command]
-async fn send_to_remarkable(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    let cfg = settings::load_settings(app.clone());
-    // Building the PDF is seconds of CPU and the upload is network IO;
-    // neither belongs on a runtime thread the UI shares.
-    tauri::async_runtime::spawn_blocking(move || {
-        let r = send_as_pdf(&app, &cfg, &path);
-        match &r {
-            Ok(msg) => eprintln!("[rm-bin] {msg}"),
-            Err(e) => eprintln!("[rm-bin] pdf upload failed: {e}"),
-        }
-        r
-    })
-    .await
-    .map_err(|e| format!("绘制任务中断：{e}"))?
-}
-
-/// No strokes and no panel takeover — the window holds the photograph and
-/// desaturates it while the document crosses. That is the honest picture of
-/// this path: what arrives is the image, unchanged apart from being in a
-/// document.
-fn send_as_pdf(
-    app: &tauri::AppHandle,
-    cfg: &settings::Settings,
-    path: &str,
-) -> Result<String, String> {
-    let _ = app.emit(PLAN_EVENT, Vec::<(f64, f64)>::new());
-    let _ = app.emit(PROGRESS_EVENT, 0.0);
-
-    let pdf = rm::pdf::build(path)?;
-    // Building is the slow half — encoding a large photograph — and the post
-    // is one request with no progress to read, so this is the only honest
-    // waypoint there is.
-    let _ = app.emit(PROGRESS_EVENT, 0.6);
-
-    let name = rm::upload::name_from_path(path);
-    let size = pdf.len();
-    let how = rm::pdf::deliver(&cfg.host, cfg.port, &name, &pdf, path, &cfg.gemini_api_key)?;
-    let _ = app.emit(PROGRESS_EVENT, 1.0);
-
-    // The ssh path may have renamed the document on Gemini's suggestion —
-    // report the name it actually landed under, not the one it was offered.
-    let (final_name, route) = match how {
-        rm::pdf::Delivered::WebInterface => (name, "the web interface"),
-        rm::pdf::Delivered::Ssh { name } => (name, "ssh (xochitl restarted)"),
-    };
-    Ok(format!(
-        "uploaded \"{final_name}.pdf\" ({size} bytes) to {} via {route}",
-        cfg.host
-    ))
-}
+use tauri::Manager;
 
 /// macOS 26 "liquid glass": the system paints an opaque backdrop for the
 /// NSWindow *and* WKWebView paints its own under-page background on top of
@@ -103,7 +50,14 @@ pub(crate) fn clear_native_background(window: &tauri::WebviewWindow) {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            send_to_remarkable,
+            pending::load_pending,
+            pending::enqueue_images,
+            pending::remove_pending,
+            pending::restore_pending,
+            pending::clear_pending,
+            pending::flush_queue,
+            pending::device_online,
+            chrome::set_interactive_rect,
             settings::load_settings,
             settings::save_settings,
             settings::test_connection,
@@ -144,10 +98,18 @@ pub fn run() {
                 .items(&[&app_menu, &edit_menu, &window_menu])
                 .build()?;
             app.set_menu(menu)?;
-            app.on_menu_event(|app, event| {
-                if event.id() == "open-settings" {
+            // Clearing goes back to the window rather than straight to
+            // `pending::clear_pending`, so the paper is seen to leave rather
+            // than simply stop existing.
+            app.on_menu_event(|app, event| match event.id().0.as_str() {
+                "open-settings" => {
                     let _ = settings::open_settings(app.clone());
                 }
+                id @ "queue-clear" => {
+                    use tauri::Emitter;
+                    let _ = app.emit("menu-action", id);
+                }
+                _ => {}
             });
 
             let window = app.get_webview_window("main").expect("no main window");

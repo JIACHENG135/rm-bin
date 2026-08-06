@@ -205,3 +205,49 @@ fn the_upload_reply_is_judged_by_its_body() {
     let html = pdf::check_reply("<html><body>404</body></html>").unwrap_err();
     assert!(html.contains("网页接口"), "{html}");
 }
+
+/// A batch is several documents decided against *one* listing, so each
+/// decision has to be visible to the next. Two screenshots bound for the same
+/// not-yet-existing folder must end up in one folder, not two identically
+/// named ones — the failure batching was introduced to stop, reappearing
+/// inside a single batch.
+#[test]
+fn a_folder_created_for_one_item_is_reused_by_the_next() {
+    let mut snap = Vec::new();
+
+    let a = pdf::place(&mut snap, "doc-a", "算法题解", "分组背包", 0);
+    let b = pdf::place(&mut snap, "doc-b", "算法题解", "树形DP", 0);
+
+    assert!(a.new_folder.is_some(), "the first item has to create the folder");
+    assert!(b.new_folder.is_none(), "the second must reuse it, not mint a second one");
+    assert_eq!(a.parent, b.parent, "both documents belong in the same folder");
+    assert!(!a.parent.is_empty());
+}
+
+/// Same name twice inside one batch has to number the second, which only
+/// works if the first was written back into the listing.
+#[test]
+fn identical_names_inside_one_batch_are_numbered() {
+    let mut snap = Vec::new();
+
+    let a = pdf::place(&mut snap, "doc-a", "算法题解", "分组背包", 0);
+    let b = pdf::place(&mut snap, "doc-b", "算法题解", "分组背包", 0);
+
+    assert_eq!(a.visible_name, "分组背包");
+    assert_eq!(b.visible_name, "分组背包 (2)");
+}
+
+/// A folder that already exists on the tablet is reused rather than shadowed,
+/// and nothing new is minted for it.
+#[test]
+fn an_existing_folder_is_reused_without_minting() {
+    let mut snap = crate::rm::upload::parse_snapshot(&format!(
+        "\u{1}{}\n{}\n",
+        "already-there",
+        r#"{"parent":"","visibleName":"算法题解","type":"CollectionType"}"#
+    ));
+
+    let p = pdf::place(&mut snap, "doc-a", "算法题解", "分组背包", 0);
+    assert_eq!(p.parent, "already-there");
+    assert!(p.new_folder.is_none());
+}

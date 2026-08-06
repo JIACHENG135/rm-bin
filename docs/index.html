@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>RM Bin — 拖一张图进去，它出现在你的 reMarkable 上</title>
-<meta name="description" content="一枚悬浮在桌面上的迷你 reMarkable Paper Pro。把图片拖上去，它就画到你的设备上。macOS 原生，开源。" />
+<title>RM Bin — 图片先攒着，什么时候发你说了算</title>
+<meta name="description" content="一枚停在桌角的迷你 reMarkable Paper Pro。图片拖进去先攒着，按住小窗 0.9 秒才发出去——一次打扰，送走一整叠。macOS 原生，开源。" />
 <meta property="og:title" content="RM Bin" />
-<meta property="og:description" content="拖一张图进去，它出现在你的 reMarkable 上。" />
+<meta property="og:description" content="图片先攒着，按住才发。一次打扰，送走一整叠。" />
 <meta property="og:type" content="website" />
 <style>
   :root {
@@ -168,6 +168,17 @@
     text-align: center;
   }
 
+  /* The bin is 112px wide in real life. These shots are shown at roughly that
+     scale rather than stretched to the column, so they stay crisp and stay
+     honest about how small the thing is. */
+  .shot img { margin: 0 auto; border-radius: 12px; }
+  .shot-s img { width: 200px; }
+  .shot-m img { width: 190px; }
+  .shot-l img { width: 340px; }
+  @media (max-width: 26rem) {
+    .shot-l img { width: 100%; }
+  }
+
   /* ————— 安装 ————— */
   pre {
     background: var(--card);
@@ -209,10 +220,10 @@
 
   <header>
     <div class="wordmark">RM Bin</div>
-    <h1>拖一张图进去，<br />它出现在你的 reMarkable 上。</h1>
+    <h1>图片先攒着，<br />什么时候发，你说了算。</h1>
     <p class="lede">
-      一枚停在桌角的迷你 Paper Pro。松手的那一刻，图片被包成一份 PDF，秒级送到
-      设备的文档库里——原图，能用笔批注。
+      一枚停在桌角的迷你 Paper Pro。拖进去的图片先留在那儿——小屏上真的堆着那一叠纸，
+      厚度就是数量。按住小窗 0.9 秒，整叠一次送走：设备只黑屏一次，不是每张一次。
     </p>
 
     <div class="stage">
@@ -222,7 +233,7 @@
     <div class="actions">
       <a class="download" href="https://github.com/JIACHENG135/rm-bin/releases/latest">下载 for macOS</a>
       <span class="meta">
-        v0.4.0 · Apple Silicon · 已用 Developer ID 签名 ·
+v0.6.0 · Apple Silicon · 已用 Developer ID 签名 ·
         <a href="https://github.com/JIACHENG135/rm-bin">源码</a>
       </span>
     </div>
@@ -230,24 +241,72 @@
 
   <section>
     <div class="rules"><i></i><i></i><i></i></div>
-    <h2>怎么用</h2>
+    <h2>为什么要攒</h2>
+    <p>
+      往 reMarkable 里塞一份文档，设备要重启一次 xochitl——<strong>黑屏 15 到 20 秒</strong>。
+      以前每拖一张就发一次，一个下午拖五张，那块屏就黑五次。代价一直在，只是看不见。
+    </p>
+    <p>
+      所以拖进去不再等于发出去。图片落进一个待发队列，你随时能看见攒了什么，
+      按住小窗 0.9 秒，整叠一次送走。<strong>一次打扰，换一整叠。</strong>
+    </p>
+
+    <figure class="shot shot-s">
+      <img src="img/queue.png" alt="小窗上堆着五张待发的纸，右下角显示数量 5" width="200" />
+      <figcaption>厚度就是数量。攒得越多，它坐得越低、影子离桌面越远。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>三个手势，一个窗口</h2>
+    <p>
+      没有新按钮，也没有第二个窗口。所有事都发生在那枚 112×148 的小窗上。
+    </p>
     <div class="steps">
       <div class="step">
         <span class="n">01</span>
-        <h3>拖</h3>
-        <p>把图片拖到那台小设备上。纸面会抬起来，跟着你的光标倾斜。</p>
+        <h3>拖进来</h3>
+        <p>入队，不发送。不是图片的文件在你松手之前就被摇头拒掉，绝不进队列。</p>
       </div>
       <div class="step">
         <span class="n">02</span>
-        <h3>传</h3>
-        <p>图片包成单页 PDF，交给设备自己的 USB 网页导入接口。</p>
+        <h3>点一下</h3>
+        <p>窗口自己长高，纸从屏幕里散成扇形。再点收回。超过 6 张换成网格。</p>
       </div>
       <div class="step">
         <span class="n">03</span>
-        <h3>落地</h3>
-        <p>完成时 Marker 手写一个对勾；连不上设备就摇头，不骗你。</p>
+        <h3>按住 0.9 秒</h3>
+        <p>屏边一条青色裁切线合拢，小屏预先变暗——松手之前你已经看见后果。</p>
       </div>
     </div>
+
+    <figure class="shot shot-m">
+      <img src="img/open.png" alt="点开后，五张纸从小窗里散成扇形" width="190" />
+      <figcaption>点一下：同一个物体长大，纸从屏幕里散出来——不是弹窗，是同一叠纸。</figcaption>
+    </figure>
+
+    <figure class="shot shot-l">
+      <img src="img/grid.png" alt="十二张纸排成三列网格" width="340" />
+      <figcaption>超过 6 张改排网格。把任意一张往外拖 34 像素松手，就撕掉它；四秒内可以放回。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="rules"><i></i><i></i><i></i></div>
+    <h2>它不会催你</h2>
+    <p>
+      攒了三天没发？它只做一次姿态变化——坐得更低一点，影子更沉一点，然后永远停在那儿。
+      <strong>不闪、不弹、不变色、不加红点。</strong>一个每天都在的东西一旦开始催你，你就会把它关掉。
+    </p>
+    <p>
+      退出 app 也不拦你。队列和缩略图都写在磁盘上，下次打开那一叠还在小屏上——
+      厚度自己会说话，不需要一句「你还有 5 张未发送」。
+    </p>
+    <p>
+      设备不在线时，小屏左下角那个 3 像素的点是空心的；按住时裁切线只走到 35% 就顶住，
+      <strong>蓄不满，就发不出去</strong>。用手感拦住，而不是用弹窗。
+    </p>
   </section>
 
   <section>
@@ -282,6 +341,7 @@
       <li>macOS 11 或更新（Liquid Glass 效果需要 macOS 26）</li>
       <li>Apple Silicon</li>
       <li>reMarkable 2 / Paper Pro，USB 直连，或与电脑同网络（走 ssh 回退）</li>
+      <li>队列存在 <code>~/Library/Application Support/com.zoe.rmbin/</code>，卸载时一并删掉即可</li>
     </ul>
   </section>
 

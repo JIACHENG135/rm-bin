@@ -1,309 +1,542 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import Widget, { DOODLES, type Phase } from "./Widget";
+import Stack, { DEAD_PX, TEAR_PX, type Drag } from "./Stack";
 import {
-  animate,
-  AnimatePresence,
-  motion,
-  useMotionValue,
-  useMotionValueEvent,
-  useSpring,
-  useTransform,
-} from "framer-motion";
+  CAP,
+  IS_TAURI,
+  clearPending,
+  deviceOnline,
+  enqueueFiles,
+  enqueuePaths,
+  flushQueue,
+  geometryFor,
+  loadPending,
+  onMenu,
+  onProgress,
+  onQueue,
+  onResult,
+  openSettings,
+  removePending,
+  setInteractive,
+  restorePending,
+  showContextMenu,
+  startDragging,
+  warmUp,
+  type PendingItem,
+  type Placed,
+} from "./pending";
 
-const IS_TAURI =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
+/* Kept in step with the Rust whitelist. Used only to decide, on `dragenter`,
+   whether to shake — the authoritative refusal happens on the way in. */
 const IMAGE_EXT = new Set([
-  "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "heic", "svg",
+  "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff",
 ]);
 const isImagePath = (p: string) =>
   IMAGE_EXT.has(p.split(".").pop()?.toLowerCase() ?? "");
 
-type Phase = "idle" | "armed" | "invalid";
-type Job = { src: string; step: "send" | "done" };
+/** Under this a press is a click; over it, it starts charging. */
+const HOLD_MS = 150;
+/** How long the charge has to be held. Long enough to be a decision. */
+const CHARGE_MS = 900;
+/** Offline, the ring stops here: firm, and obviously not stuck. */
+const OFFLINE_CAP = 0.35;
+/** So the release that fires a send does not also toggle the window. */
+const SUPPRESS_CLICK_MS = 80;
+/** Matches the card exit in the stylesheet. */
+const TEAR_EXIT_MS = 1150;
+/** How long a torn card can be put back. */
+const UNDO_MS = 4000;
+/** The e-ink panel settling before the check is written. */
+const FLASH_MS = 500;
+/** How long the receipt stays out before the window folds itself away. */
+const RECEIPT_MS = 6000;
+/** The pile lifting off, before the tablet's own darkness starts. */
+const DRAIN_MS = 700;
+const SHAKE_MS = 420;
+/** Cards flying home, before the pointer area is allowed to close in. */
+const COLLAPSE_MS = 480;
+/** The window's fixed size — see `tauri.conf.json` and `chrome.rs`. Wide and
+    tall enough for the largest layout plus room to pull a card clear of it. */
+const WINDOW = { w: 320, h: 560 };
 
-/* one traced stroke, in the image's own frame on a 0..PREVIEW_UNITS grid
-   (see draw.rs) — the same polyline the tablet's pen is drawing */
-type Stroke = [number, number][];
-const PREVIEW_UNITS = 2000;
+const SETTLE_SECS = 72 * 60 * 60;
 
-/* Ink `count` strokes (fractionally — the last one is drawn part-way, at the
-   same rate the pen is drawing it) onto the canvas.
-   The photo under the canvas is laid out with `object-fit: cover`, so the
-   strokes have to be mapped through that same cover fit or the drawing would
-   sit beside its subject rather than on it. */
-function paint(
-  canvasRef: React.MutableRefObject<HTMLCanvasElement | null>,
-  strokesRef: React.MutableRefObject<Stroke[]>,
-  imageRef: React.MutableRefObject<HTMLImageElement | null>,
-  count: number
-) {
-  const canvas = canvasRef.current;
-  const img = imageRef.current;
-  if (!canvas || !img?.naturalWidth) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  if (canvas.width !== Math.round(w * dpr)) {
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-
-  const cover = Math.max(w / img.naturalWidth, h / img.naturalHeight);
-  const dw = img.naturalWidth * cover;
-  const dh = img.naturalHeight * cover;
-  const ox = (w - dw) / 2;
-  const oy = (h - dh) / 2;
-  const px = (u: number) => ox + (u / PREVIEW_UNITS) * dw;
-  const py = (v: number) => oy + (v / PREVIEW_UNITS) * dh;
-
-  ctx.strokeStyle = "rgba(24,24,26,0.92)";
-  ctx.lineWidth = 0.8;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  const strokes = strokesRef.current;
-  /* Append a stroke to the current path, `t` of the way along its points —
-     the fractional tail is what makes the pen appear to still be moving. */
-  const trace = (stroke: Stroke, t: number) => {
-    if (!stroke?.length) return;
-    const n = Math.max(2, Math.ceil(stroke.length * Math.min(1, Math.max(0, t))));
-    ctx.moveTo(px(stroke[0][0]), py(stroke[0][1]));
-    for (let i = 1; i < n && i < stroke.length; i++) {
-      ctx.lineTo(px(stroke[i][0]), py(stroke[i][1]));
-    }
-  };
-
-  const whole = Math.min(strokes.length, Math.floor(count));
-  for (let i = 0; i < whole; i++) trace(strokes[i], 1);
-  if (whole < strokes.length) trace(strokes[whole], count - whole);
-  ctx.stroke();
+function ageLabel(secs: number) {
+  if (secs < 60) return "刚刚";
+  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟前`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)} 小时前`;
+  return `${Math.floor(secs / 86400)} 天前`;
 }
 
-/* little idle doodles: star, wave, spiral */
-const DOODLES = [
-  "M12 3.5 L14.3 9.3 L20.5 9.3 L15.5 13 L17.4 19 L12 15.4 L6.6 19 L8.5 13 L3.5 9.3 L9.7 9.3 Z",
-  "M3 13 C6 9, 9 9, 12 13 C15 17, 18 17, 21 13",
-  "M12.5 12.5 C13.8 12.3 14.2 10.9 13 10.3 C11.2 9.5 9.4 11 9.8 12.9 C10.3 15.4 13.2 16.5 15.4 15.2 C18.2 13.6 18.7 9.8 16.4 7.6",
-] as const;
-
-/* On a real device the reveal lasts exactly as long as the tablet takes to
-   ink the page, because it *is* the tablet inking the page. This is only the
-   browser-dev fallback, where there is no tablet and no traced strokes — the
-   photo just fades on a timer. */
-const SCAN_MS = 1500;
-
 export default function App() {
+  const [items, setItems] = useState<PendingItem[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
-  const [job, setJob] = useState<Job | null>(null);
-  const [sent, setSent] = useState(false);
+  const [charge, setCharge] = useState(0);
+  const [online, setOnline] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+
   const [hover, setHover] = useState(false);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const [tearing, setTearing] = useState<string[]>([]);
+  const [removed, setRemoved] = useState<{
+    item: PendingItem;
+    index: number;
+  } | null>(null);
+
+  const [receipt, setReceipt] = useState<Placed | null>(null);
+  const [receiptList, setReceiptList] = useState<Placed[] | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [doodle, setDoodle] = useState<number | null>(null);
-  const busy = useRef(false);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
-  /* ————— magnetic tilt: paper follows the cursor while a file hovers ————— */
-  const mx = useMotionValue(0.5);
-  const my = useMotionValue(0.5);
-  const rotX = useSpring(useTransform(my, [0, 1], [7, -7]), {
-    stiffness: 200,
-    damping: 16,
-  });
-  const rotY = useSpring(useTransform(mx, [0, 1], [-7, 7]), {
-    stiffness: 200,
-    damping: 16,
-  });
-  const track = (x: number, y: number) => {
-    mx.set(Math.min(1, Math.max(0, x / window.innerWidth)));
-    my.set(Math.min(1, Math.max(0, y / window.innerHeight)));
-  };
-  const untrack = () => {
-    mx.set(0.5);
-    my.set(0.5);
-  };
+  const raf = useRef(0);
+  const holdTimer = useRef(0);
+  const undoTimer = useRef(0);
+  const shrinkTimer = useRef(0);
+  const tearTimers = useRef(new Map<string, number>());
+  const dragRef = useRef<Drag | null>(null);
+  const dragFrom = useRef({ x: 0, y: 0 });
+  const pressFrom = useRef({ x: 0, y: 0 });
+  const pressing = useRef(false);
+  const charging = useRef(false);
+  const chargeRef = useRef(0);
+  /** the release that sent must not also be read as a click */
+  const suppressClick = useRef(false);
+  const live = useRef({ items, phase, online, expanded });
+  live.current = { items, phase, online, expanded };
 
-  /* ————— the drawing, mirrored —————
-     The backend sends the traced strokes once (`draw-plan`) and then a running
-     count of how many the tablet has inked (`draw-progress`, fractional). So
-     the screen here isn't playing an animation that happens to last the right
-     amount of time — it's inking the same lines, in the same order, at the
-     moment they land on the page. The photo fades out underneath as they
-     accumulate, ending where the tablet ends: ink on paper. */
-  const strokes = useRef<Stroke[]>([]);
-  const canvas = useRef<HTMLCanvasElement | null>(null);
-  const image = useRef<HTMLImageElement | null>(null);
+  const n = items.length;
+  const busy =
+    phase === "render" ||
+    phase === "drain" ||
+    phase === "restart" ||
+    phase === "flash";
+  /* Charging closes the window: whatever is spread out is about to be sent,
+     and holding it open would be showing you a thing that no longer exists.
+     The undo corner keeps it open a moment longer than the queue does, so a
+     tear that empties the queue is still reversible. */
+  const open =
+    (expanded && n > 0 && !busy && phase !== "charging") ||
+    (removed !== null && !busy);
+  const geom = geometryFor(n, open);
+  /* The cards are laid out for the open window whatever the window is doing.
+     Their positions must not depend on `open`, or they shift under the
+     animation that is meant to be carrying them. */
+  const layout = geometryFor(n, true);
 
-  const drawn = useMotionValue(0); // strokes inked, fractional
-  const drawnSmooth = useSpring(drawn, {
-    stiffness: 140,
-    damping: 24,
-    mass: 0.4,
-  });
-  /* 0..1 of the whole drawing — only the photo underneath uses this */
-  const frac = useMotionValue(0);
-  const fracSmooth = useSpring(frac, { stiffness: 90, damping: 22, mass: 0.5 });
-  /* With strokes coming, the photo is scaffolding: it fades out as the ink
-     replaces it. In screen mode there is no ink — the photo itself is what
-     lands on the panel — so it stays, and only loses its colour, which is
-     exactly what happens to it on the way there. */
-  const photoOpacity = useTransform(fracSmooth, (p) =>
-    strokes.current.length ? 1 - p * 0.86 : 1
-  );
-  const photoFilter = useTransform(
-    fracSmooth,
-    (p) => `grayscale(${p}) contrast(${1 + p * 0.1})`
-  );
+  const oldest = n ? Math.min(...items.map((i) => i.added_at)) : 0;
+  const age = n ? now - oldest : 0;
+  const settled = n > 0 && age > SETTLE_SECS;
 
-  useMotionValueEvent(drawnSmooth, "change", (n) => paint(canvas, strokes, image, n));
+  /* ————— backend wiring ————— */
 
   useEffect(() => {
-    if (!IS_TAURI) return;
+    let dead = false;
     const off: Array<() => void> = [];
-    let cancelled = false;
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
+    void (async () => {
+      await warmUp();
+      const state = await loadPending();
+      if (dead) return;
+      setItems(state.items);
+      if (state.skipped > 0) {
+        setNote(`已跳过 ${state.skipped} 项（源文件不在了）`);
+      }
       off.push(
-        await listen<Stroke[]>("draw-plan", (e) => {
-          strokes.current = e.payload;
+        await onQueue((s) => setItems(s.items)),
+        await onProgress((p) => {
+          if (p.stage === "render") {
+            // A is the whole of the local work, so it owns the whole ring
+            setCharge(Math.min(1, p.frac / 0.6));
+          } else if (p.stage === "upload") {
+            // the paper comes off the desk *before* the screen goes dark:
+            // first the thing leaves your hands, then the device goes busy
+            setCharge(1);
+            setPhase("drain");
+            window.setTimeout(() => setPhase("restart"), DRAIN_MS);
+          }
         }),
-        await listen<number>("draw-progress", (e) => {
-          const n = Math.max(0, e.payload);
-          drawn.set(n);
-          // With no strokes the backend is reporting 0..1 directly — screen
-          // mode has nothing to count but the picture arriving.
-          frac.set(
-            strokes.current.length ? Math.min(1, n / strokes.current.length) : Math.min(1, n)
-          );
+        await onResult((r) => {
+          if (!r.ok) {
+            console.error(r.error);
+            setPhase("invalid");
+            setCharge(0);
+            setNote(r.error);
+            window.setTimeout(
+              () => setPhase(live.current.items.length ? "pending" : "idle"),
+              SHAKE_MS
+            );
+            return;
+          }
+          setPhase("flash");
+          window.setTimeout(() => {
+            setPhase("done");
+            setCharge(0);
+            setReceipt(r.placed[r.placed.length - 1] ?? null);
+            setReceiptList(r.placed);
+            window.setTimeout(() => {
+              setPhase("idle");
+              setReceipt(null);
+              setReceiptList(null);
+            }, RECEIPT_MS);
+          }, FLASH_MS);
+        }),
+        await onMenu((action) => {
+          if (action === "queue-clear") void clearPending();
         })
       );
-      if (cancelled) off.forEach((f) => f());
+      if (dead) off.forEach((f) => f());
     })();
     return () => {
-      cancelled = true;
+      dead = true;
       off.forEach((f) => f());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const send = async (path: string, src: string) => {
-    if (busy.current) return;
-    busy.current = true;
-    untrack();
-    // jump, don't animate — the springs must not sweep in from wherever the
-    // previous drop left them
-    strokes.current = [];
-    drawn.jump(0);
-    drawnSmooth.jump(0);
-    frac.jump(0);
-    fracSmooth.jump(0);
-    setJob({ src, step: "send" });
-    let ok = true;
-    try {
-      if (IS_TAURI) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("send_to_remarkable", { path });
-      } else {
-        animate(frac, 1, { duration: SCAN_MS / 1000, ease: "easeInOut" });
-        await new Promise((r) => setTimeout(r, SCAN_MS));
-      }
-    } catch (e) {
-      ok = false;
-      console.error(e);
-    }
-    drawn.set(strokes.current.length);
-    frac.set(1);
-    setJob({ src, step: "done" });
-    // a beat of stillness after the ink settles, then the page is sent off
-    setTimeout(() => {
-      setJob(null);
-      setTimeout(() => {
-        // the resolution: a check if it landed on the page, a head-shake if
-        // the tablet never took it
-        if (ok) {
-          setSent(true);
-          setTimeout(() => {
-            setSent(false);
-            busy.current = false;
-          }, 1400);
-        } else {
-          setPhase("invalid");
-          setTimeout(() => {
-            setPhase("idle");
-            busy.current = false;
-          }, 700);
-        }
-      }, 350);
-    }, 500);
-  };
+  /* ————— how much of the window is real —————
+     The window never changes size, so nothing here can make it flicker. What
+     changes is only how much of it catches the pointer: the device alone when
+     shut, the whole open layout when the paper is out, and everything while a
+     card is being dragged, so the gesture can travel past the edge of the
+     paper without being handed to the desktop mid-drag.
 
-  /* ————— tauri native drag-drop ————— */
+     Widening is immediate; narrowing waits for the cards to land, or letting
+     go just outside the pile would drop the pointer through the floor. */
+  useEffect(() => {
+    clearTimeout(shrinkTimer.current);
+    const base =
+      open && receiptList
+        ? { w: 112, h: 148 + 14 + Math.min(receiptList.length, 8) * 14 }
+        : geometryFor(n, open);
+    if (drag) {
+      void setInteractive(WINDOW.w, WINDOW.h);
+      return;
+    }
+    if (open) {
+      void setInteractive(base.w, base.h);
+      return;
+    }
+    shrinkTimer.current = window.setTimeout(
+      () => void setInteractive(base.w, base.h),
+      COLLAPSE_MS
+    );
+    return () => clearTimeout(shrinkTimer.current);
+  }, [open, n, receiptList, drag !== null]);
+
+  /* ————— is the tablet there ————— */
+  useEffect(() => {
+    if (busy) return;
+    let dead = false;
+    const poll = async () => {
+      const ok = await deviceOnline();
+      if (!dead) setOnline(ok);
+    };
+    void poll();
+    const every = open ? 5000 : n > 0 ? 10000 : 30000;
+    const iv = window.setInterval(poll, every);
+    return () => {
+      dead = true;
+      clearInterval(iv);
+    };
+  }, [open, n, busy]);
+
+  useEffect(() => {
+    const iv = window.setInterval(
+      () => setNow(Math.floor(Date.now() / 1000)),
+      30000
+    );
+    return () => clearInterval(iv);
+  }, []);
+
+  /* ————— send ————— */
+
+  const send = useCallback(async () => {
+    setPhase("render");
+    setCharge(0);
+    setReceipt(null);
+    setReceiptList(null);
+    setExpanded(false);
+    setHoverId(null);
+    setNote(null);
+    try {
+      await flushQueue();
+    } catch (e) {
+      console.error(e);
+      setPhase(live.current.items.length ? "pending" : "idle");
+    }
+  }, []);
+
+  const beginCharge = useCallback(() => {
+    const { items: cur, online: up } = live.current;
+    /* whatever is spread out is on its way to the tablet — put it away */
+    setExpanded(false);
+    setHoverId(null);
+    charging.current = true;
+    chargeRef.current = 0;
+    setPhase("charging");
+    setCharge(0);
+    /* offline the ring simply cannot fill — the refusal is in the hand, not
+       in a dialog, and it costs nothing to find out */
+    const cap = up ? 1 : OFFLINE_CAP;
+    const t0 = performance.now();
+    const step = () => {
+      if (!charging.current) return;
+      chargeRef.current = Math.min(cap, (performance.now() - t0) / CHARGE_MS);
+      setCharge(chargeRef.current);
+      raf.current = requestAnimationFrame(step);
+    };
+    raf.current = requestAnimationFrame(step);
+    void cur;
+  }, []);
+
+  const startPress = useCallback(
+    (e: React.PointerEvent) => {
+      pressFrom.current = { x: e.screenX, y: e.screenY };
+      pressing.current = true;
+      const { items: cur, phase: p } = live.current;
+      if (!cur.length || (p !== "idle" && p !== "pending" && p !== "armed")) {
+        return;
+      }
+      /* A press is not yet a gesture. Under 150ms it turns out to have been a
+         click; past that it commits to charging, which is why the ring never
+         flickers on during an ordinary click. */
+      holdTimer.current = window.setTimeout(beginCharge, HOLD_MS);
+    },
+    [beginCharge]
+  );
+
+  /** Let go early and nothing happened — which is why there is no second
+      confirmation anywhere in this flow. Cancelling costs zero. */
+  const cancelCharge = useCallback(() => {
+    clearTimeout(holdTimer.current);
+    if (!charging.current) return;
+    charging.current = false;
+    cancelAnimationFrame(raf.current);
+    chargeRef.current = 0;
+    setCharge(0);
+    setPhase(live.current.items.length ? "pending" : "idle");
+  }, []);
+
+  const endPress = useCallback(() => {
+    clearTimeout(holdTimer.current);
+    pressing.current = false;
+    if (!charging.current) return;
+    charging.current = false;
+    cancelAnimationFrame(raf.current);
+    const held = chargeRef.current;
+    chargeRef.current = 0;
+    setCharge(0);
+    // a release that did something must not also toggle the window open
+    suppressClick.current = true;
+    window.setTimeout(() => {
+      suppressClick.current = false;
+    }, SUPPRESS_CLICK_MS);
+
+    if (held >= 1) {
+      void send();
+    } else if (!live.current.online) {
+      // it stopped at 35% and would not go further; the shake says so again
+      setPhase("invalid");
+      window.setTimeout(
+        () => setPhase(live.current.items.length ? "pending" : "idle"),
+        SHAKE_MS
+      );
+    } else {
+      setPhase(live.current.items.length ? "pending" : "idle");
+    }
+  }, [send]);
+
+  /* The device is also the window's handle. A press that stays put is a click
+     or a send; a press that travels is someone moving the bin on their
+     desktop. The window drag cannot be declarative (`data-tauri-drag-region`)
+     because that claims the mousedown before any of this gets to run. */
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      if (!pressing.current) return;
+      const { x, y } = pressFrom.current;
+      if (Math.hypot(e.screenX - x, e.screenY - y) <= DEAD_PX) return;
+      pressing.current = false;
+      suppressClick.current = true;
+      window.setTimeout(() => {
+        suppressClick.current = false;
+      }, SUPPRESS_CLICK_MS);
+      cancelCharge();
+      void startDragging();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", endPress);
+    window.addEventListener("pointercancel", endPress);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", endPress);
+      window.removeEventListener("pointercancel", endPress);
+    };
+  }, [cancelCharge, endPress]);
+
+  const toggle = useCallback(() => {
+    if (suppressClick.current) return;
+    const { items: cur, phase: p } = live.current;
+    if (!cur.length || p === "charging") return;
+    if (p === "render" || p === "drain" || p === "restart" || p === "flash") {
+      return;
+    }
+    setExpanded((v) => !v);
+    setHoverId(null);
+  }, []);
+
+  /* The keyboard has no "hold", so it does not pretend to: ⌘↩ is the plain
+     equivalent, and cancelling it is simply not pressing it. */
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key !== "Enter") return;
+      const { items: cur, phase: p, online: up } = live.current;
+      if (!cur.length || !up || (p !== "idle" && p !== "pending")) return;
+      e.preventDefault();
+      void send();
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [send]);
+
+  /* ————— tearing a card out ————— */
+
+  const tear = useCallback(
+    (id: string) => {
+      const index = items.findIndex((i) => i.id === id);
+      const item = items[index];
+      if (!item) return;
+      setTearing((t) => [...t, id]);
+      const timer = window.setTimeout(() => {
+        tearTimers.current.delete(id);
+        void removePending(id);
+        setTearing((t) => t.filter((x) => x !== id));
+      }, TEAR_EXIT_MS);
+      tearTimers.current.set(id, timer);
+      setRemoved({ item, index });
+      clearTimeout(undoTimer.current);
+      undoTimer.current = window.setTimeout(() => setRemoved(null), UNDO_MS);
+    },
+    [items]
+  );
+
+  const undo = useCallback(() => {
+    if (!removed) return;
+    const { item, index } = removed;
+    clearTimeout(undoTimer.current);
+    setRemoved(null);
+    const timer = tearTimers.current.get(item.id);
+    if (timer !== undefined) {
+      // still mid-exit: nothing has left yet, so just stop it leaving
+      clearTimeout(timer);
+      tearTimers.current.delete(item.id);
+      setTearing((t) => t.filter((x) => x !== item.id));
+    } else {
+      void restorePending(item, index);
+    }
+  }, [removed]);
+
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dx = e.screenX - dragFrom.current.x;
+      const dy = e.screenY - dragFrom.current.y;
+      // below the dead zone this is still a hover with a twitch in it
+      const next =
+        Math.hypot(dx, dy) < DEAD_PX ? { ...d, dx: 0, dy: 0 } : { ...d, dx, dy };
+      dragRef.current = next;
+      setDrag(next);
+    };
+    const up = () => {
+      const d = dragRef.current;
+      if (!d) return;
+      dragRef.current = null;
+      setDrag(null);
+      if (Math.hypot(d.dx, d.dy) > TEAR_PX) tear(d.id);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+  }, [tear]);
+
+  /* ————— what comes in ————— */
+
+  const flashInvalid = useCallback(() => {
+    setPhase("invalid");
+    window.setTimeout(
+      () => setPhase(live.current.items.length ? "pending" : "idle"),
+      SHAKE_MS
+    );
+  }, []);
+
+  const accept = useCallback(
+    async (paths: string[]) => {
+      const state = await enqueuePaths(paths);
+      setItems(state.items);
+      if (state.rejected > 0) {
+        // one shake for the whole drop, however many were turned away, and no
+        // filenames: dropping the wrong file is something you already know
+        flashInvalid();
+        setNote(`${state.rejected} 张读不出来`);
+      } else {
+        setPhase(state.items.length ? "pending" : "idle");
+      }
+    },
+    [flashInvalid]
+  );
+
   useEffect(() => {
     if (!IS_TAURI) return;
     let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
-      const [{ getCurrentWebviewWindow }, { convertFileSrc }] =
-        await Promise.all([
-          import("@tauri-apps/api/webviewWindow"),
-          import("@tauri-apps/api/core"),
-        ]);
+    let dead = false;
+    void (async () => {
+      const { getCurrentWebviewWindow } = await import(
+        "@tauri-apps/api/webviewWindow"
+      );
       const un = await getCurrentWebviewWindow().onDragDropEvent((event) => {
         const p = event.payload;
-        const s = window.devicePixelRatio || 1;
         if (p.type === "enter") {
+          // the refusal lands before you let go, so walking away is free
           setPhase(p.paths.some(isImagePath) ? "armed" : "invalid");
-          track(p.position.x / s, p.position.y / s);
-        } else if (p.type === "over") {
-          track(p.position.x / s, p.position.y / s);
         } else if (p.type === "drop") {
-          const img = p.paths.find(isImagePath);
-          setPhase("idle");
-          if (img) send(img, convertFileSrc(img));
-          else {
-            setPhase("invalid");
-            setTimeout(() => setPhase("idle"), 500);
-          }
-          untrack();
+          void accept(p.paths);
         } else if (p.type === "leave") {
-          setPhase("idle");
-          untrack();
+          setPhase(live.current.items.length ? "pending" : "idle");
         }
       });
-      if (cancelled) un();
+      if (dead) un();
       else unlisten = un;
     })();
     return () => {
-      cancelled = true;
+      dead = true;
       unlisten?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [accept]);
 
-  /* ————— browser fallback for vite dev ————— */
+  /* browser fallback, so the timing can be worked on without a tablet */
   useEffect(() => {
     if (IS_TAURI) return;
     const over = (e: DragEvent) => {
       e.preventDefault();
       setPhase("armed");
-      track(e.clientX, e.clientY);
     };
-    const leave = () => {
-      setPhase("idle");
-      untrack();
-    };
-    const drop = (e: DragEvent) => {
+    const leave = () => setPhase(live.current.items.length ? "pending" : "idle");
+    const drop = async (e: DragEvent) => {
       e.preventDefault();
-      setPhase("idle");
-      untrack();
-      const f = Array.from(e.dataTransfer?.files ?? []).find((f) =>
-        f.type.startsWith("image/")
-      );
-      if (f) {
-        const url = URL.createObjectURL(f);
-        send(url, url);
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (!files.length) return;
+      const state = await enqueueFiles(files);
+      setItems(state.items);
+      if (state.rejected > 0) {
+        flashInvalid();
+        setNote(`${state.rejected} 张读不出来`);
+      } else {
+        setPhase(state.items.length ? "pending" : "idle");
       }
     };
     window.addEventListener("dragover", over);
@@ -314,231 +547,165 @@ export default function App() {
       window.removeEventListener("dragleave", leave);
       window.removeEventListener("drop", drop);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [flashInvalid]);
 
-  /* right-click pops a real NSMenu — no chrome lives on the sheet itself */
-  const contextMenu = async () => {
-    if (!IS_TAURI) return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("show_context_menu");
-  };
+  /* A delivery is the one time the window opens by itself — the receipt put
+     down on the desk. It closes again on its own, or the moment you leave. */
+  useEffect(() => {
+    if (receiptList) setExpanded(true);
+  }, [receiptList]);
+  useEffect(() => {
+    if (receiptList && !hover) setExpanded(false);
+  }, [receiptList, hover]);
 
-  const armed = phase === "armed";
-  const invalid = phase === "invalid";
-  const idle = !job && !sent && phase === "idle";
+  /* the note has been read by the time the window shuts */
+  useEffect(() => {
+    if (!open && note) {
+      const t = window.setTimeout(() => setNote(null), 400);
+      return () => clearTimeout(t);
+    }
+  }, [open, note]);
 
   /* while truly idle, the Marker doodles in the corner now and then */
+  const idle = n === 0 && phase === "idle" && !receipt;
   useEffect(() => {
     if (!idle) {
       setDoodle(null);
       return;
     }
-    let n = 0;
-    let hide: number | undefined;
+    let i = 0;
+    let hide = 0;
     const iv = window.setInterval(() => {
-      setDoodle(n % 3);
-      n++;
+      setDoodle(i % DOODLES.length);
+      i++;
       hide = window.setTimeout(() => setDoodle(null), 3600);
     }, 8000);
     return () => {
       clearInterval(iv);
-      if (hide) clearTimeout(hide);
+      clearTimeout(hide);
     };
   }, [idle]);
 
-  /* ————— sheet motion states ————— */
-  const variant = invalid
-    ? "invalid"
-    : job
-    ? "loaded"
-    : sent
-    ? "nod"
-    : armed
-    ? "armed"
-    : "idle";
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(raf.current);
+      clearTimeout(holdTimer.current);
+      clearTimeout(undoTimer.current);
+      clearTimeout(shrinkTimer.current);
+      tearTimers.current.forEach(clearTimeout);
+    },
+    []
+  );
+
+  const showReceipt = open && receiptList !== null;
+
+  /* The open window has exactly one free strip — 12px above the top card —
+     so the things it will say have to queue up for it, most actionable
+     first. None of them is worth pushing a card out of the way for. */
+  const status = note
+    ? note
+    : !online
+    ? "设备离线 · 检查连接"
+    : n > CAP
+    ? `+${n - CAP} 张未显示 · 最早 ${ageLabel(age)}`
+    : n
+    ? `最早 ${ageLabel(age)}`
+    : "";
 
   return (
     <div
       className="wrap"
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setHoverId(null);
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
-        contextMenu();
+        void showContextMenu();
       }}
     >
-      <motion.div
-        className="fade"
-        animate={{ opacity: armed || invalid || hover || job ? 1 : 0.5 }}
-        transition={{ duration: 0.45, ease: "easeOut" }}
-      >
-      <motion.div
-        className="sheet"
-        data-tauri-drag-region
-        style={{ rotateX: rotX, rotateY: rotY }}
-        variants={{
-          /* breathing: rests small and quiet, grows when a file approaches */
-          idle: {
-            x: 0,
-            y: [0, -5, 0],
-            scale: [0.78, 0.81, 0.78],
-            transition: {
-              y: { duration: 3.2, repeat: Infinity, ease: "easeInOut" },
-              scale: { duration: 3.2, repeat: Infinity, ease: "easeInOut" },
-            },
-          },
-          /* lifted by the approaching file */
-          armed: {
-            x: 0,
-            y: -9,
-            scale: 1.08,
-            transition: { type: "spring", stiffness: 380, damping: 20 },
-          },
-          /* the page dips under the weight of the landing image */
-          loaded: {
-            x: 0,
-            y: [0, 2.5, 0],
-            scale: [1, 0.985, 1],
-            transition: { duration: 0.4, times: [0, 0.4, 1], ease: "easeOut" },
-          },
-          /* a small satisfied nod as the check is written */
-          nod: {
-            x: 0,
-            y: 0,
-            scale: 1,
-            rotate: [0, -1.6, 1.1, 0],
-            transition: { duration: 0.65, ease: "easeInOut" },
-          },
-          /* quiet head-shake */
-          invalid: {
-            x: [0, -6, 5, -3, 2, 0],
-            y: 0,
-            scale: 1,
-            transition: { duration: 0.38, ease: "easeInOut" },
-          },
-        }}
-        animate={variant}
-      >
-        {/* the Marker, magnetically attached */}
-        <div className="pen" />
-
-        <motion.div
-          className="sheet-shadow"
-          animate={{ opacity: armed ? 1 : 0 }}
-          transition={{ duration: 0.3 }}
+      {!showReceipt && (
+        <Stack
+          items={items}
+          geom={layout}
+          tearing={tearing}
+          open={open}
+          hoverId={hoverId}
+          drag={drag}
+          onCardDown={(id, e) => {
+            e.stopPropagation();
+            dragFrom.current = { x: e.screenX, y: e.screenY };
+            dragRef.current = { id, dx: 0, dy: 0 };
+            setDrag(dragRef.current);
+          }}
+          onCardEnter={setHoverId}
+          onCardLeave={() => setHoverId(null)}
         />
+      )}
 
-        {/* ambient light drifting across the aluminum frame */}
-        <div className="sheen" />
-
-        {/* the e-ink screen, inset in the bezel */}
-        <div className="screen" data-tauri-drag-region>
-        {/* ruled lines: step aside when content arrives, return a beat later */}
-        <motion.div
-          className="page-lines"
-          data-tauri-drag-region
-          animate={{ opacity: job || armed || sent ? 0 : 1 }}
-          transition={{ duration: 0.35, delay: job || sent ? 0 : 0.25 }}
+      {open && !showReceipt && status && (
+        <div
+          className="status-row"
+          style={{ bottom: `${geom.h - 11}px`, width: `${geom.w - 4}px` }}
+          data-actionable={!online}
+          onClick={
+            online
+              ? undefined
+              : (e) => {
+                  e.stopPropagation();
+                  void openSettings();
+                  void deviceOnline().then(setOnline);
+                }
+          }
         >
-          <i /><i /><i />
-          <span className="brand">reMarkable</span>
-        </motion.div>
-
-        {/* the print */}
-        <AnimatePresence>
-          {job && (
-            <motion.div
-              key="print"
-              className="print"
-              initial={{ opacity: 0, scale: 1.14, y: 10, filter: "blur(0px)" }}
-              animate={{ opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }}
-              /* the ink slowly evaporates off the page */
-              exit={{
-                opacity: 0,
-                scale: 1.04,
-                y: -6,
-                filter: "blur(7px)",
-                transition: { duration: 1.15, ease: [0.4, 0, 0.6, 1] },
-              }}
-              transition={{
-                type: "spring",
-                stiffness: 320,
-                damping: 18,
-                opacity: { duration: 0.2 },
-              }}
-            >
-              {/* the photo, receding as the drawing takes its place */}
-              <motion.img
-                ref={image}
-                src={job.src}
-                alt=""
-                draggable={false}
-                style={{ opacity: photoOpacity, filter: photoFilter }}
-                onLoad={() => paint(canvas, strokes, image, drawnSmooth.get())}
-              />
-
-              {/* the same strokes the tablet's pen is drawing, as it draws them */}
-              <canvas ref={canvas} className="ink-canvas" />
-
-              <div className="grain" />
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* idle doodles, sketched in the corner */}
-        <AnimatePresence>
-          {doodle !== null && (
-            <motion.svg
-              key={`doodle-${doodle}`}
-              className="doodle"
-              viewBox="0 0 24 24"
-              fill="none"
-              initial={{ opacity: 1 }}
-              exit={{ opacity: 0, transition: { duration: 0.9 } }}
-            >
-              <motion.path
-                d={DOODLES[doodle]}
-                stroke="rgba(28,28,30,0.4)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                initial={{ pathLength: 0 }}
-                animate={{ pathLength: 1 }}
-                transition={{ duration: 1.1, ease: "easeInOut" }}
-              />
-            </motion.svg>
-          )}
-        </AnimatePresence>
-
-        {/* the resolution: a check, handwritten by the Marker */}
-        <AnimatePresence>
-          {sent && (
-            <motion.svg
-              key="tick"
-              className="tick"
-              viewBox="0 0 48 44"
-              fill="none"
-              initial={{ opacity: 1 }}
-              exit={{ opacity: 0, transition: { duration: 0.5 } }}
-            >
-              <motion.path
-                d="M11 25 C 15 29, 18 32, 20.5 34.5 C 25 26.5, 32.5 16, 40 10.5"
-                stroke="rgba(28,28,30,0.82)"
-                strokeWidth="2.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                initial={{ pathLength: 0 }}
-                animate={{ pathLength: 1 }}
-                transition={{ duration: 0.5, ease: [0.35, 0, 0.3, 1] }}
-              />
-            </motion.svg>
-          )}
-        </AnimatePresence>
+          {status}
         </div>
-      </motion.div>
-      </motion.div>
+      )}
 
+      {/* the delivered index, laid out like a receipt */}
+      {showReceipt && (
+        <div className="receipt-list">
+          {receiptList.slice(0, 8).map((r, i) => (
+            <div
+              className="receipt-row"
+              key={`${r.folder}/${r.name}/${i}`}
+              style={{ animationDelay: `${i * 70}ms` }}
+            >
+              <span className="folder">{r.folder}</span>
+              <span className="doc">{r.name}</span>
+            </div>
+          ))}
+          {receiptList.length > 8 && (
+            <div className="receipt-more">…及其余 {receiptList.length - 8} 份</div>
+          )}
+        </div>
+      )}
+
+      {/* a torn-off corner left on the table for four seconds */}
+      {removed !== null && (
+        <div
+          className="undo-corner"
+          onClick={(e) => {
+            e.stopPropagation();
+            undo();
+          }}
+        />
+      )}
+
+      <div className="stage" onPointerDown={startPress} onClick={toggle}>
+        <Widget
+          items={items}
+          phase={phase}
+          charge={charge}
+          online={online}
+          hover={hover || open}
+          receipt={receipt}
+          settled={settled}
+          doodle={doodle}
+          hideStack={open}
+        />
+      </div>
     </div>
   );
 }
